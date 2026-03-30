@@ -1,0 +1,32 @@
+# Vector DB
+weaviate-client>=4.5,<5.0
+
+# LLM + Embeddings (OpenAI)
+openai>=1.50
+
+# Agent RAG (LangGraph)
+langgraph>=0.2
+
+# Reranking optionnel (Cohere)
+# cohere>=5.0
+
+# UI
+streamlit>=1.32
+
+# Config
+python-dotenv>=1.0
+
+# Logging
+loguru>=0.7
+
+# PDF text extraction (fallback si openingestion n'est pas installé)
+pymupdf>=1.23
+
+# ─────────────────────────────────────────────────
+# openingestion (pipeline d'ingestion principal)
+# Installer depuis le dossier parent en dehors de ce requirements.txt :
+#
+#   pip install -e "../openingestion"
+#   # ou avec le support docling :
+#   pip install -e "../openingestion[docling]"
+# ─────────────────────────────────────────────────
