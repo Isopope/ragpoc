@@ -1,0 +1,27 @@
+# Requirements for Elysia LangGraph Implementation
+
+# Core LangGraph dependencies
+langgraph>=0.1.0
+langgraph-cli>=0.1.0
+
+# LangChain for LLM integration
+langchain>=0.1.0
+langchain-openai>=0.0.5
+
+# Data/State management
+pydantic>=2.0
+typing-extensions>=4.0
+
+# Optional: Weaviate client for real data retrieval
+weaviate-client>=3.25.0
+
+# Optional: LLM providers
+openai>=1.0
+anthropic>=0.7
+
+# Async/utility
+aiohttp>=3.8
+asyncio-contextmanager>=1.0
+
+# Logging and debugging
+python-dotenv>=1.0

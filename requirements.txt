@@ -6,6 +6,7 @@ openai>=1.50
 
 # Agent RAG (LangGraph)
 langgraph>=0.2
+pydantic>=2.0
 
 # Reranking optionnel (Cohere)
 # cohere>=5.0

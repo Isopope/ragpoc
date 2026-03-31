@@ -21,6 +21,7 @@ TOP_K_RETRIEVE  = int(os.getenv("TOP_K_RETRIEVE", "20"))
 TOP_K_FINAL     = int(os.getenv("TOP_K_FINAL", "5"))
 HYBRID_ALPHA    = float(os.getenv("HYBRID_ALPHA", "0.5"))
 MAX_TOKENS      = int(os.getenv("MAX_TOKENS", "1000"))
+AGENT_BACKEND   = os.getenv("AGENT_BACKEND", "rag_pipeline")
 UPLOADS_DIR     = Path(__file__).parent / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
@@ -71,6 +72,15 @@ def _get_agent():
     openai_key = _get_openai()
     if store is None or openai_key is None:
         return None
+    if AGENT_BACKEND == "elysia":
+        from langgraph_implementation.rag_agent import ElysiaRAGAgent
+        return ElysiaRAGAgent(
+            weaviate_store  = store,
+            openai_key      = openai_key,
+            embedding_model = EMBEDDING_MODEL,
+            llm_model       = LLM_MODEL,
+        )
+
     from rag_pipeline import RAGAgent
     return RAGAgent(
         weaviate_store  = store,
