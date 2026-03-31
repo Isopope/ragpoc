@@ -81,7 +81,7 @@ def _get_agent():
             llm_model       = LLM_MODEL,
         )
 
-    from rag_pipeline import RAGAgent
+    from rag_agent import RAGAgent
     return RAGAgent(
         weaviate_store  = store,
         openai_key      = openai_key,
