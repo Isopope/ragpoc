@@ -128,22 +128,85 @@ class TreeBuilder:
             "inputs": tool_inputs,
         }
     
-    def get_successive_actions(self, current_branch: str) -> dict[str, Any]:
+    def get_successive_actions(self, from_branch_id: Optional[str] = None) -> dict[str, Any]:
         """
-        Get the tree of actions that can follow from the current branch.
-        Similar to the successive_actions in DecisionPrompt.
+        Recursively build the tree of possible actions from the root.
+        Mirrors Elysia's _get_successive_actions (recursive dict of dicts).
+
+        Output shape:
+            {"search": {"query": {"summarise_items": {}}, "aggregate": {}}, "text_response": {}}
         """
-        current_node = self.nodes.get(current_branch)
-        if not current_node:
+        start = from_branch_id or self.root
+        if not start or start not in self.nodes:
             return {}
-        
-        return {
-            tool_name: {
-                "description": tool["description"],
-                "inputs": tool.get("inputs", {}),
-            }
-            for tool_name, tool in current_node.options.items()
-        }
+
+        node = self.nodes[start]
+        result: dict[str, Any] = {}
+        for option_name, option_info in node.options.items():
+            # If this option is itself a branch, recurse into it
+            if option_info.get("is_branch") and option_name in self.nodes:
+                result[option_name] = self.get_successive_actions(option_name)
+            else:
+                result[option_name] = {}
+        return result
+
+    def filter_available_tools(
+        self,
+        branch_id: str,
+        state: "ElysiaState",
+    ) -> tuple[dict[str, Any], dict[str, dict[str, str]]]:
+        """
+        Determine which tools are available and which are not at the current branch.
+        Mirrors Elysia's _get_available_tools.
+
+        A tool is unavailable if it defines an `is_tool_available` key
+        whose value is a callable returning (bool, reason_str).
+        Branches (is_branch=True) are always available.
+
+        Returns:
+            (available_actions_dict, unavailable_actions_dict)
+        """
+        node = self.nodes.get(branch_id)
+        if not node:
+            return {}, {}
+
+        available: dict[str, Any] = {}
+        unavailable: dict[str, dict[str, str]] = {}
+
+        for tool_name, tool_info in node.options.items():
+            # Branches are always available
+            if tool_info.get("is_branch"):
+                available[tool_name] = {
+                    "function_name": tool_name,
+                    "description": tool_info.get("description", ""),
+                    "inputs": tool_info.get("inputs", {}),
+                }
+                continue
+
+            checker = tool_info.get("is_tool_available")
+            if checker and callable(checker):
+                is_available, reason = checker(state)
+                if is_available:
+                    available[tool_name] = {
+                        "function_name": tool_name,
+                        "description": tool_info.get("description", ""),
+                        "inputs": tool_info.get("inputs", {}),
+                    }
+                else:
+                    unavailable[tool_name] = {
+                        "function_name": tool_name,
+                        "description": tool_info.get("description", ""),
+                        "available_at": reason,
+                    }
+            else:
+                # No availability check → always available
+                available[tool_name] = {
+                    "function_name": tool_name,
+                    "description": tool_info.get("description", ""),
+                    "inputs": tool_info.get("inputs", {}),
+                }
+
+        return available, unavailable
     
     def get_branch_structure(self) -> dict[str, Any]:
         """Get the complete tree structure for display/debugging."""
@@ -168,9 +231,12 @@ def format_decision_prompt_context(
     """
     current_branch = tree_builder.nodes.get(state["current_branch"])
     
-    # Format available actions
-    available_actions = {}
-    if current_branch:
+    # Get available vs unavailable tools (mirrors Elysia's _get_available_tools)
+    available_actions, unavailable_actions = tree_builder.filter_available_tools(
+        state["current_branch"], state
+    )
+    if not available_actions and current_branch:
+        # Fallback: expose everything if the filter returned nothing
         for tool_name, tool_info in current_branch.options.items():
             available_actions[tool_name] = {
                 "function_name": tool_name,
@@ -187,8 +253,8 @@ def format_decision_prompt_context(
             "timestamp": error.get("timestamp"),
         })
     
-    # Tree count as "current/max"
-    tree_count = f"{state['tree_depth']}/{state['max_tree_depth']}"
+    # Tree count as "current/max" (mirrors tree_data.tree_count_string)
+    tree_count = f"{state.get('num_trees_completed', 0)}/{state['max_tree_depth']}"
     
     return {
         "instruction": state.get("branch_instruction", current_branch.instruction if current_branch else ""),
@@ -196,8 +262,8 @@ def format_decision_prompt_context(
         "tree_count": tree_count,
         "conversation_history": state["conversation_history"][-5:] if state["conversation_history"] else [],
         "available_actions": available_actions,
-        "unavailable_actions": state.get("unavailable_actions", {}),
-        "successive_actions": tree_builder.get_successive_actions(state["current_branch"]),
+        "unavailable_actions": unavailable_actions,
+        "successive_actions": tree_builder.get_successive_actions(),  # recursive from root
         "previous_errors": previous_errors,
         "retrieved_objects_summary": format_environment_for_llm(state["environment"]),
         "tasks_completed_summary": tasks_completed_string(state),
@@ -230,7 +296,7 @@ class MultibranchTree(TreeBuilder):
         self._build_multibranch_structure()
     
     def _build_multibranch_structure(self):
-        """Build the multi-branch tree structure."""
+        """Build the multi-branch tree structure mirroring Elysia's multi_branch_init."""
         # Root branch: Base decision
         self.add_branch(
             branch_id="base",
@@ -241,8 +307,15 @@ class MultibranchTree(TreeBuilder):
             Base your decision on what information is available and what the user is asking for.
             """,
             tools=[
-                {"name": "summarize", "description": "Summarize retrieved information"},
-                {"name": "text_response", "description": "Generate a text response"},
+                {
+                    "name": "summarize",
+                    "description": "Summarize retrieved information into a response for the user.",
+                    "is_tool_available": lambda state: (
+                        bool(state.get("environment")),
+                        "Summarize is only available once information has been retrieved.",
+                    ),
+                },
+                {"name": "text_response", "description": "Generate a text response to the user based on currently available information."},
             ],
             is_root=True,
         )
@@ -256,12 +329,19 @@ class MultibranchTree(TreeBuilder):
             - Aggregating: For summary statistics, counting, averaging, or other statistical operations
             """,
             tools=[
-                {"name": "query", "description": "Semantic/keyword search on knowledge base"},
-                {"name": "aggregate", "description": "Perform aggregation operations"},
+                {"name": "query", "description": "Semantic/keyword search on knowledge base. Retrieves documents matching a query."},
+                {"name": "aggregate", "description": "Perform aggregation/statistical operations on collection data."},
             ],
             is_root=False,
             parent_branch_id="base",
         )
+        
+        # Override the auto-generated description for the "search" option in "base"
+        if "search" in self.nodes["base"].options:
+            self.nodes["base"].options["search"]["description"] = (
+                "Search the knowledge base. Use when the user needs more information. "
+                "Choose to query (semantic/keyword search) or aggregate (statistical operations)."
+            )
 
 
 class OneBranchTree(TreeBuilder):

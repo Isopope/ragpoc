@@ -79,6 +79,13 @@ class ElysiaState(TypedDict):
     next_action: Optional[str]  # Which action to take next
     reasoning: str  # LLM reasoning for the decision
     
+    # Decision flags (mirrors Elysia Decision object)
+    end_actions: bool  # LLM decided to stop (all actions exhausted)
+    impossible: bool  # LLM judged the task impossible
+    
+    # Tree restart tracking (mirrors Elysia's recursive async_run)
+    num_trees_completed: int  # Number of full tree traversals completed
+    
     # Response
     final_response: Optional[str]  # The final response to the user
     
@@ -118,6 +125,9 @@ def create_initial_state(
         tasks_completed=[],
         next_action=None,
         reasoning="",
+        end_actions=False,
+        impossible=False,
+        num_trees_completed=0,
         final_response=None,
         branch_instruction="",
         branch_status="",

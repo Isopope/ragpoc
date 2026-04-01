@@ -17,6 +17,8 @@ class DecisionOutput(BaseModel):
     reasoning: str = Field(description="Detailed reasoning for the choice")
     confidence: float = Field(description="Confidence score 0-1")
     parameters: dict = Field(default_factory=dict, description="Parameters for the action")
+    end_actions: bool = Field(default=False, description="Whether to stop after this action")
+    impossible: bool = Field(default=False, description="Whether the task is judged impossible")
 
 
 class DecisionMaker:
@@ -93,7 +95,7 @@ class DecisionMaker:
             return self._mock_decision(context, previous_failures)
 
         if self.raw_client is not None:
-            return await self._decide_with_openai(context, previous_failures)
+            return await self._decide_with_openai(context, previous_failures, max_retries)
 
         from langchain.schema import SystemMessage, HumanMessage
         
@@ -117,7 +119,11 @@ Available tools:
 Analyze the user's query, what information you already have, and what tools are available.
 Choose the action that best progresses toward answering the user's query.
 Explain your reasoning clearly.
-MUST ONLY return an action from the Available Actions list."""),
+MUST ONLY return an action from the Available Actions list.
+
+You MUST also decide:
+- end_actions: set to True if you believe all useful actions are exhausted AFTER this action completes.
+- impossible: set to True ONLY if the task is clearly impossible given the available tools."""),
                     HumanMessage(content=prompt),
                 ]
                 
@@ -198,79 +204,105 @@ Please provide a clear, concise, and helpful answer."""
         self,
         context: dict[str, Any],
         previous_failures: Optional[list[dict]] = None,
+        max_retries: int = 3,
     ) -> dict[str, Any]:
-        """Use the raw OpenAI client with a strict JSON decision output."""
+        """Use the raw OpenAI client with retry loop mirroring AssertedModule."""
         available_actions = list(context.get("available_actions", {}).keys())
         if not available_actions:
             return self._mock_decision(context, previous_failures)
 
-        failures = previous_failures or []
-        prompt = self._build_decision_prompt(context, failures)
-        schema_hint = {
-            "action": available_actions[0],
-            "reasoning": "Short explanation tied to available tools and current context.",
-            "confidence": 0.7,
-            "parameters": {},
-        }
+        current_failures = list(previous_failures) if previous_failures else []
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are an Elysia-style routing agent. "
-                    f"You must choose exactly one action from: {', '.join(available_actions)}. "
-                    "Return JSON only."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"{prompt}\n\n"
-                    "Respond with a JSON object using this shape:\n"
-                    f"{json.dumps(schema_hint, ensure_ascii=False)}"
-                ),
-            },
-        ]
+        for attempt in range(max_retries):
+            prompt = self._build_decision_prompt(context, current_failures)
+            schema_hint = {
+                "action": "<one of: " + ", ".join(available_actions) + ">",
+                "reasoning": "Short explanation tied to available tools and current context.",
+                "confidence": 0.7,
+                "parameters": {},
+                "end_actions": False,
+                "impossible": False,
+            }
 
-        try:
-            response = await asyncio.to_thread(
-                self.raw_client.chat.completions.create,
-                model=self.model_name,
-                messages=messages,
-                temperature=0.0,
-                max_tokens=500,
-                response_format={"type": "json_object"},
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an Elysia-style routing agent. "
+                        f"You must choose exactly one action from: {', '.join(available_actions)}. "
+                        "Set end_actions to true if you believe all useful actions are exhausted after this one. "
+                        "Set impossible to true ONLY if the task cannot be done with available tools. "
+                        "Return JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"{prompt}\n\n"
+                        "Respond with a JSON object using this shape:\n"
+                        f"{json.dumps(schema_hint, ensure_ascii=False)}"
+                    ),
+                },
+            ]
+
+            try:
+                response = await asyncio.to_thread(
+                    self.raw_client.chat.completions.create,
+                    model=self.model_name,
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=500,
+                    response_format={"type": "json_object"},
+                )
+                content = response.choices[0].message.content or "{}"
+                parsed = json.loads(content)
+            except Exception as e:
+                print(f"Error in raw OpenAI decision (attempt {attempt+1}/{max_retries}): {e}")
+                current_failures.append({"error_message": f"API call failed: {e}"})
+                continue
+
+            action = parsed.get("action")
+
+            # Assertion: action must be in available_actions (mirrors _tool_assertion)
+            if action not in available_actions:
+                feedback = (
+                    f"You picked '{action}' — that is NOT in available_actions! "
+                    f"Your output MUST be one of: {available_actions}"
+                )
+                print(f"AssertedModule feedback (attempt {attempt+1}): {feedback}")
+                current_failures.append({"error_message": feedback})
+                continue
+
+            # Guard: don't text_response/summarize when nothing retrieved
+            retrieved_summary = context.get("retrieved_objects_summary", "")
+            no_results_yet = (
+                "No objects retrieved yet." in retrieved_summary
+                or "No retrieved objects yet." in retrieved_summary
             )
-            content = response.choices[0].message.content or "{}"
-            parsed = json.loads(content)
-        except Exception as e:
-            print(f"Error in raw OpenAI decision: {e}")
-            return self._mock_decision(context, previous_failures)
+            if no_results_yet:
+                if "search" in available_actions and action in {"text_response", "summarize"}:
+                    action = "search"
+                elif "query" in available_actions and action in {"text_response", "summarize"}:
+                    action = "query"
 
-        action = parsed.get("action")
-        if action not in available_actions:
-            action = available_actions[0]
+            confidence = parsed.get("confidence", 0.7)
+            try:
+                confidence = float(confidence)
+            except (TypeError, ValueError):
+                confidence = 0.7
 
-        retrieved_summary = context.get("retrieved_objects_summary", "")
-        no_results_yet = "No objects retrieved yet." in retrieved_summary or "No retrieved objects yet." in retrieved_summary
-        if no_results_yet:
-            if "search" in available_actions and action in {"text_response", "summarize"}:
-                action = "search"
-            elif "query" in available_actions and action in {"text_response", "summarize"}:
-                action = "query"
+            return {
+                "action": action,
+                "reasoning": parsed.get("reasoning", f"Selected {action}"),
+                "confidence": max(0.0, min(1.0, confidence)),
+                "parameters": parsed.get("parameters", {}) or {},
+                "end_actions": bool(parsed.get("end_actions", False)),
+                "impossible": bool(parsed.get("impossible", False)),
+            }
 
-        confidence = parsed.get("confidence", 0.7)
-        try:
-            confidence = float(confidence)
-        except (TypeError, ValueError):
-            confidence = 0.7
-
-        return {
-            "action": action,
-            "reasoning": parsed.get("reasoning", f"Selected {action}"),
-            "confidence": max(0.0, min(1.0, confidence)),
-            "parameters": parsed.get("parameters", {}) or {},
-        }
+        # All retries exhausted
+        print("Max retries reached in _decide_with_openai, falling back to mock")
+        return self._mock_decision(context, previous_failures)
 
     async def _generate_response_with_openai(
         self,
@@ -378,7 +410,7 @@ Current Status:
                                 formatted += f"- {key}: {value}\n"
         
         return formatted
-    
+
     def _parse_decision_response(
         self,
         response_text: str,
@@ -387,7 +419,6 @@ Current Status:
     ) -> dict[str, Any]:
         """Parse the LLM response into a structured decision."""
         
-        # Try to extract action from response
         available_actions = list(context.get('available_actions', {}).keys())
         
         action = None
@@ -400,46 +431,65 @@ Current Status:
             raise ValueError(f"Could not find any of the available actions {available_actions} in the model response text.")
         
         if not action and available_actions:
-            action = available_actions[0]  # Default to first action
+            action = available_actions[0]
         
         return {
             "action": action or "text_response",
             "reasoning": response_text,
             "confidence": 0.7,
             "parameters": {},
+            "end_actions": "end_actions" in response_text.lower() and "true" in response_text.lower(),
+            "impossible": "impossible" in response_text.lower() and "true" in response_text.lower(),
         }
-    
+
+        
     def _mock_decision(
         self,
         context: dict[str, Any],
         previous_failures: Optional[list[dict]] = None,
     ) -> dict[str, Any]:
-        """Create a mock decision (for demo/testing)."""
-        
-        available_actions = list(context.get('available_actions', {}).keys())
-        
-        # Simple heuristic: choose query if user_prompt hasn't been searched
-        retrieved_summary = context.get("retrieved_objects_summary", "")
-        no_results_yet = "No objects retrieved yet." in retrieved_summary or "No retrieved objects yet." in retrieved_summary
+        """Create a mock decision mirroring Elysia's decision logic for demo/testing."""
 
+        available_actions = list(context.get('available_actions', {}).keys())
+
+        retrieved_summary = context.get("retrieved_objects_summary", "")
+        no_results_yet = (
+            "No objects retrieved yet." in retrieved_summary
+            or "No retrieved objects yet." in retrieved_summary
+        )
+        has_results = not no_results_yet
+
+        # Decision logic:
+        # 1. If no results → search (or query)
+        # 2. If results exist → text_response with end_actions=True
         if no_results_yet and "search" in available_actions:
             action = "search"
-        elif context.get('user_prompt') and 'query' in available_actions:
-            action = 'query'
-        elif 'query' in available_actions:
-            action = 'query'
+            end_actions = False
+        elif no_results_yet and "query" in available_actions:
+            action = "query"
+            end_actions = False
+        elif has_results and "text_response" in available_actions:
+            action = "text_response"
+            end_actions = True
+        elif has_results and "summarize" in available_actions:
+            action = "summarize"
+            end_actions = True
         elif available_actions:
             action = available_actions[0]
+            end_actions = False
         else:
-            action = 'text_response'
-        
+            action = "text_response"
+            end_actions = True
+
         return {
             "action": action,
-            "reasoning": f"Mock decision: chose {action}",
+            "reasoning": f"Mock decision: chose {action} (has_results={has_results})",
             "confidence": 0.5,
             "parameters": {},
+            "end_actions": end_actions,
+            "impossible": False,
         }
-    
+
     def _mock_response(
         self,
         user_prompt: str,
