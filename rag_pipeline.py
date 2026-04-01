@@ -93,6 +93,7 @@ Structure requise :
 _CHUNK_INDEX_MIN = 0
 _CHUNK_INDEX_MAX = 100_000   # garde-fou anti-injection
 BASE_TOKEN_THRESHOLD = 12_000  # ~48k chars → déclenche la compression du contexte
+MAX_NO_PROGRESS_STEPS = 2
 
 
 # ── Helpers : parsing & fusion ────────────────────────────────────────────────
@@ -283,6 +284,8 @@ class RAGState(TypedDict):
     seen_keys:          set[tuple[str, int]] # Déduplication
     seen_queries:       list[tuple[str, float]] # Déduplication des recherches
     agent_iterations:   int             # Compteur d'itérations
+    consecutive_no_progress: int       # Nombre d'actions successives sans nouveau contexte utile
+    last_action_new_docs: int          # Nombre de nouveaux chunks ajoutés à la dernière action
     conversation_summary: str          # Résumé des échanges précédents (passé par l'UI)
     context_summary:    str            # Résumé compressé du contexte de recherche interne
 
@@ -529,6 +532,13 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
                 sources_info = f"Documents indexés: {', '.join(names)}."
                 if state.get("source_filter"):
                     sources_info += f" (Filtré sur {Path(state['source_filter']).name})"
+
+            current_docs = len(state.get("all_docs", []))
+            no_progress = state.get("consecutive_no_progress", 0)
+            progress_hint = (
+                f"\nContexte collecté jusque-là: {current_docs} extrait(s) uniques. "
+                f"Actions sans progrès consécutives: {no_progress}."
+            )
             
             plans = " - " + "\n - ".join(state.get("sub_queries", [state["question"]]))
 
@@ -548,18 +558,20 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
                 )
 
             initial_prompt = (
-                f"Tu es un agent de recherche documentaire expert.\n{sources_info}\n\n"
+                f"Tu es un agent de recherche documentaire expert.\n{sources_info}{progress_hint}\n\n"
                 f"Question de l'utilisateur : {state['question']}\n\n"
                 "Le système d'analyse préconise d'essayer ces angles de recherche :\n"
                 f"{plans}\n\n"
                 "RÈGLES STRICTES :\n"
                 f"{first_rule}"
                 "2. Si un extrait semble coupé ou incomplet, utilise 'get_neighboring_chunk'.\n"
-                "3. Écris ton raisonnement AVANT chaque appel d'outil ou décision finale.\n"
-                "4. Varie les formulations de recherche pour couvrir tous les aspects de la question.\n"
+                "3. Avant un appel d'outil, écris AU PLUS une phrase courte de raisonnement.\n"
+                "4. N'appelle PAS un outil si tu as déjà assez d'éléments pour répondre.\n"
                 "5. Quand les extraits récupérés suffisent à répondre, dis 'RECHERCHE_TERMINEE'.\n"
+                "   Si la dernière action n'a apporté aucun nouveau chunk utile, évite de relancer une recherche proche.\n"
+                f"   Si tu disposes déjà d'environ {top_k_final} extraits utiles, termine la recherche.\n"
                 "   IMPORTANT : Ne dis JAMAIS 'RECHERCHE_TERMINEE' si tu reçois des erreurs de la base documentaire.\n"
-                "   En cas d'erreur d'un outil, essaie une autre formulation ou un autre angle — ne capitule pas.\n"
+                "   En cas d'erreur d'un outil, essaie une autre formulation ou un autre angle — sans boucler inutilement.\n"
                 f"6. Ne jamais inventer d'informations non présentes dans les extraits.{context_injection}"
             )
             messages.append({"role": "user", "content": initial_prompt})
@@ -612,7 +624,10 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
         all_docs = list(state.get("all_docs", []))
         seen_keys = set(state.get("seen_keys", set()))
         seen_queries = list(state.get("seen_queries", []))
+        consecutive_no_progress = state.get("consecutive_no_progress", 0)
         filter_ = state.get("source_filter")
+        action_new_docs = 0
+        action_made_progress = False
         
         # Le dernier message est celui du modèle avec potentiellement des appels de fonction
         model_content = messages[-1]
@@ -667,6 +682,8 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
                                 "next_chunk": doc.get("next_chunk", -1),
                             })
                         result = {"found": len(merged), "new_chunks": new_count, "results": chunks_info[:10]}
+                        action_new_docs += new_count
+                        action_made_progress = action_made_progress or (new_count > 0)
                         log.append(_log_entry(
                             "agent.action",
                             f"Recherche '{query[:50]}' → {len(merged)} hits ({new_count} nouveaux)",
@@ -700,6 +717,8 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
                                 chunk["_expanded"] = True
                                 all_docs.append(chunk)
                                 seen_keys.add(k)
+                                action_new_docs += 1
+                                action_made_progress = True
                             result = {"found": True, "chunk": {"chunk_index": idx, "content": chunk.get("page_content", "")}}
                             log.append(_log_entry("agent.action", f"Voisin {src_name} idx {idx}"))
                         else:
@@ -723,13 +742,24 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
             })
 
         messages.extend(fn_response_parts)
+        if action_made_progress:
+            consecutive_no_progress = 0
+        else:
+            consecutive_no_progress += 1
+            log.append(_log_entry(
+                "agent.guard",
+                f"Aucune progression utile sur cette action ({consecutive_no_progress}/{MAX_NO_PROGRESS_STEPS})",
+                {"new_docs": action_new_docs, "seen_docs": len(all_docs)},
+            ))
         
         return {
             "messages": messages, 
             "decision_log": log,
             "all_docs": all_docs,
             "seen_keys": seen_keys,
-            "seen_queries": seen_queries
+            "seen_queries": seen_queries,
+            "consecutive_no_progress": consecutive_no_progress,
+            "last_action_new_docs": action_new_docs,
         }
 
     # ── Routeur après action : compression si budget token dépassé ───────────
@@ -742,6 +772,22 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
         )
         doc_chars = sum(len(doc.get("page_content", "")) for doc in state.get("all_docs", []))
         estimated_tokens = (msg_chars + doc_chars) // 4
+        no_progress = state.get("consecutive_no_progress", 0)
+        doc_count = len(state.get("all_docs", []))
+
+        if no_progress >= MAX_NO_PROGRESS_STEPS:
+            logger.info(
+                "[{}] Arrêt anticipé de la boucle : {} action(s) sans progrès",
+                state["question_id"], no_progress,
+            )
+            return "consolidate"
+
+        if doc_count >= top_k_final and state.get("last_action_new_docs", 0) == 0:
+            logger.info(
+                "[{}] Arrêt anticipé : {} chunks collectés et dernière action sans nouveauté",
+                state["question_id"], doc_count,
+            )
+            return "consolidate"
 
         if estimated_tokens > BASE_TOKEN_THRESHOLD:
             logger.info(
@@ -1044,6 +1090,7 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
     builder.add_conditional_edges("agent_action", route_after_action, {
         "compress_context": "compress_context",
         "agent_reason":     "agent_reason",
+        "consolidate":      "consolidate",
     })
     builder.add_edge("compress_context", "agent_reason")
     
@@ -1123,6 +1170,8 @@ class RAGAgent:
             "seen_keys":            set(),
             "seen_queries":         [],
             "agent_iterations":     0,
+            "consecutive_no_progress": 0,
+            "last_action_new_docs": 0,
             "conversation_summary": conversation_summary,
             "context_summary":      "",
             "retrieved_docs":       [],
@@ -1172,6 +1221,8 @@ class RAGAgent:
             "seen_keys":            set(),
             "seen_queries":         [],
             "agent_iterations":     0,
+            "consecutive_no_progress": 0,
+            "last_action_new_docs": 0,
             "conversation_summary": "",
             "context_summary":      "",
             "retrieved_docs":       [],
