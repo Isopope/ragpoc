@@ -50,18 +50,18 @@ def build_unified_graph(config, weaviate_store, cohere_client=None):
         return route_agent(s)
 
     def _route_after_action(state):
-        return route_after_action(state, config=config)
+        return route_after_action(state, rag_config=config)
 
     # Nodes avec injection via partial
-    _analyze    = partial(analyze_and_plan,    llm_call=llm_call,    config=config)
-    _reason     = partial(agent_reason,        llm_call=llm_call,    config=config)
-    _action     = partial(agent_action,        query_tool=query_tool, config=config, weaviate_store=weaviate_store)
-    _compress   = partial(compress_context,    llm_call=llm_call,    config=config)
-    _consolidate= partial(consolidate_chunks,  query_tool=query_tool, config=config)
-    _rerank     = partial(rerank,              llm_call=llm_call,    cohere_client=cohere_client, config=config)
-    _generate   = partial(generate,            llm_call=llm_call,    config=config)
-    _follow_up  = partial(generate_follow_up,  llm_call=llm_call,    config=config)
-    _title      = partial(generate_title,      llm_call=llm_call,    config=config)
+    _analyze    = partial(analyze_and_plan,    llm_call=llm_call,    rag_config=config)
+    _reason     = partial(agent_reason,        llm_call=llm_call,    rag_config=config)
+    _action     = partial(agent_action,        query_tool=query_tool, rag_config=config, weaviate_store=weaviate_store)
+    _compress   = partial(compress_context,    llm_call=llm_call,    rag_config=config)
+    _consolidate= partial(consolidate_chunks,  query_tool=query_tool, rag_config=config)
+    _rerank     = partial(rerank,              llm_call=llm_call,    cohere_client=cohere_client, rag_config=config)
+    _generate   = partial(generate,            llm_call=llm_call,    rag_config=config)
+    _follow_up  = partial(generate_follow_up,  llm_call=llm_call,    rag_config=config)
+    _title      = partial(generate_title,      llm_call=llm_call,    rag_config=config)
 
     builder = StateGraph(UnifiedRAGState)
     builder.add_node("analyze_and_plan",   _analyze)
@@ -125,6 +125,7 @@ class RAGAgent:
         max_tokens: int = 4000,
         max_agent_iter: int = 60,
         llm_timeout: float = 30.0,
+        enable_compression: bool = False,
     ) -> None:
         from .config import RAGConfig
 
@@ -139,6 +140,7 @@ class RAGAgent:
             max_tokens      = max_tokens,
             max_agent_iter  = max_agent_iter,
             llm_timeout     = llm_timeout,
+            enable_compression = enable_compression,
         )
         self._store = weaviate_store
 

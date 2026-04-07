@@ -54,7 +54,7 @@ def _resolve_source_filter(
     return None
 
 
-def analyze_and_plan(state: UnifiedRAGState, *, llm_call: Callable, config: RAGConfig) -> dict:
+def analyze_and_plan(state: UnifiedRAGState, *, llm_call: Callable, rag_config: RAGConfig) -> dict:
     """Nœud 1 : décompose la question et identifie le filtre source."""
     qid      = state["question_id"]
     log      = list(state.get("decision_log", []))

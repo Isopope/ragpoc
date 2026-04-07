@@ -85,7 +85,7 @@ def route_agent(state: UnifiedRAGState) -> str:
     return "agent_action"
 
 
-def route_after_action(state: UnifiedRAGState, *, config: RAGConfig) -> str:
+def route_after_action(state: UnifiedRAGState, *, rag_config: RAGConfig) -> str:
     """Routeur après agent_action.
 
     Retourne "compress_context" si le budget token est dépassé, sinon "agent_reason".
@@ -98,7 +98,15 @@ def route_after_action(state: UnifiedRAGState, *, config: RAGConfig) -> str:
     doc_chars = sum(len(doc.get("page_content", "")) for doc in state.get("all_docs", []))
     estimated = (msg_chars + doc_chars) // 4
 
-    if estimated > config.token_threshold:
+    if not rag_config.enable_compression:
+        if estimated > rag_config.token_threshold:
+            logger.info(
+                "[{}] Compression désactivée — seuil dépassé ({} tokens estimés)",
+                state["question_id"], estimated,
+            )
+        return "agent_reason"
+
+    if estimated > rag_config.token_threshold:
         logger.info(
             "[{}] Seuil de compression atteint ({} tokens estimés)",
             state["question_id"], estimated,
@@ -152,7 +160,7 @@ def _build_initial_prompt(state: UnifiedRAGState) -> str:
     )
 
 
-def agent_reason(state: UnifiedRAGState, *, llm_call: Callable, config: RAGConfig) -> dict:
+def agent_reason(state: UnifiedRAGState, *, llm_call: Callable, rag_config: RAGConfig) -> dict:
     """Nœud 2 : raisonnement ReAct, produit des tool_calls ou termine la boucle."""
     qid        = state["question_id"]
     log        = list(state.get("decision_log", []))
@@ -219,7 +227,7 @@ def agent_action(
     state: UnifiedRAGState,
     *,
     query_tool: QueryTool,
-    config: RAGConfig,
+    rag_config: RAGConfig,
     weaviate_store: Any = None,
 ) -> dict:
     """Nœud 3 : exécute les tool_calls du modèle (search_documents / get_neighboring_chunk)."""
@@ -251,7 +259,7 @@ def agent_action(
                 log.append(log_entry("agent.action", f"Skip query (duplicate): {query[:50]}"))
             else:
                 try:
-                    merged     = query_tool.execute(query, source_filter=filter_, top_k=config.top_k_retrieve, alpha=config.hybrid_alpha)
+                    merged     = query_tool.execute(query, source_filter=filter_, top_k=rag_config.top_k_retrieve, alpha=rag_config.hybrid_alpha)
                     new_count  = 0
                     chunks_info: list[dict] = []
 
@@ -354,7 +362,7 @@ def consolidate_chunks(
     state: UnifiedRAGState,
     *,
     query_tool: QueryTool,
-    config: RAGConfig,
+    rag_config: RAGConfig,
 ) -> dict:
     """Consolide et déduplique tous les chunks à la fin de la boucle ReAct."""
     docs = state.get("all_docs", [])
@@ -366,7 +374,7 @@ def consolidate_chunks(
             docs = query_tool.execute(
                 state["question"],
                 source_filter=state.get("source_filter"),
-                top_k=config.top_k_retrieve,
+                top_k=rag_config.top_k_retrieve,
                 alpha=0.5,
             )
         except Exception:

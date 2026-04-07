@@ -310,6 +310,7 @@ def build_rag_graph(
     max_tokens: int = 4000,
     max_agent_iter: int = 60,
     llm_timeout: float = 30.0,
+    enable_compression: bool = True,
 ):
     """Compile et retourne le graphe LangGraph RAG.
 
@@ -325,6 +326,9 @@ def build_rag_graph(
         max_tokens:       Budget de tokens pour la réponse finale.
         max_agent_iter:   Nombre maximal d'itérations de la boucle ReAct.
         llm_timeout:      Timeout en secondes sur chaque appel LLM OpenAI.
+        enable_compression:
+                         Si False, le nœud compress_context est conservé dans le graphe
+                         mais n'est jamais emprunté.
     """
     import threading
 
@@ -789,6 +793,14 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
             )
             return "consolidate"
 
+        if not enable_compression:
+            if estimated_tokens > BASE_TOKEN_THRESHOLD:
+                logger.info(
+                    "[{}] Compression désactivée — seuil dépassé ({} tokens estimés), retour à agent_reason",
+                    state["question_id"], estimated_tokens,
+                )
+            return "agent_reason"
+
         if estimated_tokens > BASE_TOKEN_THRESHOLD:
             logger.info(
                 "[{}] Seuil de compression atteint ({} tokens estimés) → compress_context",
@@ -1123,6 +1135,7 @@ class RAGAgent:
         max_tokens: int = 4000,
         max_agent_iter: int = 60,
         llm_timeout: float = 30.0,
+        enable_compression: bool = True,
     ) -> None:
         self._store = weaviate_store
         self._graph = build_rag_graph(
@@ -1137,6 +1150,7 @@ class RAGAgent:
             max_tokens      = max_tokens,
             max_agent_iter  = max_agent_iter,
             llm_timeout     = llm_timeout,
+            enable_compression = enable_compression,
         )
 
     def stream_query(

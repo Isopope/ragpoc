@@ -43,7 +43,7 @@ Structure requise :
 - Aspects manquants ou incomplets"""
 
 
-def compress_context(state: UnifiedRAGState, *, llm_call: Callable, config: RAGConfig) -> dict:
+def compress_context(state: UnifiedRAGState, *, llm_call: Callable, rag_config: RAGConfig) -> dict:
     """Compresse les docs récupérés quand le budget token est dépassé.
 
     Réinitialise messages = [] pour que agent_reason reparte avec la summary injectée.

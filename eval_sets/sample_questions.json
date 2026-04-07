@@ -1,0 +1,23 @@
+[
+  {
+    "id": "budget_2024",
+    "question": "que'est ce que le PRI ?",
+    "expected_elements": ["budget", "2024"],
+    "tags": ["factuel", "budget"],
+    "notes": "Question factuelle simple pour verifier la precision retrieval + generation."
+  },
+  {
+    "id": "manuel_dev",
+    "question": "Quels sont les matieres du semestre 8 ?",
+    "source": null,
+    "expected_elements": ["developpeur", "manuel"],
+    "tags": ["resume", "documentation"]
+  },
+  {
+    "id": "follow_up_budget",
+    "question": "que sont les polypoints ?",
+    "conversation_summary": "L'utilisateur vient de demander le budget 2024 et la reponse precedente parlait du document budget.pdf.",
+    "expected_elements": ["priorite"],
+    "tags": ["follow-up", "contexte"]
+  }
+]

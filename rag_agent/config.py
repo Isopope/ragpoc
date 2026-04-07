@@ -41,6 +41,7 @@ class RAGConfig:
 
     # ── Feature flags ─────────────────────────────────────────────────────────
     use_cohere_rerank: bool = True
+    enable_compression: bool = False
     use_follow_up: bool = True
     use_title_generation: bool = True
     debug: bool = False
@@ -68,6 +69,7 @@ class RAGConfig:
             max_tree_depth=int(os.getenv("MAX_TREE_DEPTH", "5")),
             tree_mode=os.getenv("LANGGRAPH_MODE", "rag"),
             use_cohere_rerank=os.getenv("USE_COHERE_RERANK", "true").lower() == "true",
+            enable_compression=os.getenv("ENABLE_COMPRESSION", "false").lower() == "true",
             use_follow_up=os.getenv("USE_FOLLOW_UP", "true").lower() == "true",
             use_title_generation=os.getenv("USE_TITLE_GENERATION", "true").lower() == "true",
             debug=os.getenv("DEBUG", "false").lower() == "true",
@@ -100,4 +102,5 @@ class RAGConfig:
             "token_threshold": self.token_threshold,
             "tree_mode": self.tree_mode,
             "use_cohere_rerank": self.use_cohere_rerank,
+            "enable_compression": self.enable_compression,
         }

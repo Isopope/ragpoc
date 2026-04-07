@@ -102,7 +102,7 @@ def rerank(
     *,
     llm_call: Callable,
     cohere_client: Optional[Any],
-    config: RAGConfig,
+    rag_config: RAGConfig,
 ) -> dict:
     """Nœud 4 : reranking Cohere (si dispo) ou fallback LLM."""
     qid      = state["question_id"]
@@ -115,7 +115,7 @@ def rerank(
         return {"reranked_docs": [], "decision_log": log}
 
     # ── Cohere ────────────────────────────────────────────────────────────────
-    if config.use_cohere_rerank and cohere_client is not None:
+    if rag_config.use_cohere_rerank and cohere_client is not None:
         try:
             reranked = _cohere_rerank(docs, question, cohere_client)
             log.append(log_entry(
@@ -133,7 +133,7 @@ def rerank(
             ))
 
     # ── Fallback LLM ──────────────────────────────────────────────────────────
-    reranked = _llm_rerank(docs, question, llm_call, config.llm_timeout)
+    reranked = _llm_rerank(docs, question, llm_call, rag_config.llm_timeout)
     log.append(log_entry(
         "rerank.llm",
         f"LLM Rerank : {len(docs)} → {len(reranked)} chunks",

@@ -55,7 +55,7 @@ def _build_context_entry(index: int, doc: dict) -> str:
     return f"{header}\n{content}"
 
 
-def generate(state: UnifiedRAGState, *, llm_call: Callable, config: RAGConfig) -> dict:
+def generate(state: UnifiedRAGState, *, llm_call: Callable, rag_config: RAGConfig) -> dict:
     """Nœud 5 : génère la réponse finale à partir des chunks rerankés."""
     qid      = state["question_id"]
     docs     = state.get("reranked_docs", [])
@@ -83,8 +83,8 @@ def generate(state: UnifiedRAGState, *, llm_call: Callable, config: RAGConfig) -
                 {"role": "user",   "content": user_content},
             ],
             temperature=0.1,
-            max_tokens=config.max_tokens,
-            timeout=config.llm_timeout * 2,
+            max_tokens=rag_config.max_tokens,
+            timeout=rag_config.llm_timeout * 2,
         )
         answer = resp.choices[0].message.content or ""
         if not answer:
@@ -104,12 +104,12 @@ def generate(state: UnifiedRAGState, *, llm_call: Callable, config: RAGConfig) -
     return {"answer": answer, "final_response": answer, "error": None, "decision_log": log}
 
 
-def generate_follow_up(state: UnifiedRAGState, *, llm_call: Callable, config: RAGConfig) -> dict:
+def generate_follow_up(state: UnifiedRAGState, *, llm_call: Callable, rag_config: RAGConfig) -> dict:
     """Génère 2-3 questions de suivi pertinentes.
 
     Nouveau nœud inspiré de langgraph_implementation.
     """
-    if not config.use_follow_up:
+    if not rag_config.use_follow_up:
         return {"follow_up_suggestions": [], "hidden_environment": state.get("hidden_environment", {})}
 
     question = state["question"]
@@ -157,12 +157,12 @@ def generate_follow_up(state: UnifiedRAGState, *, llm_call: Callable, config: RA
     }
 
 
-def generate_title(state: UnifiedRAGState, *, llm_call: Callable, config: RAGConfig) -> dict:
+def generate_title(state: UnifiedRAGState, *, llm_call: Callable, rag_config: RAGConfig) -> dict:
     """Génère un titre court pour la conversation.
 
     Nouveau nœud inspiré de langgraph_implementation.
     """
-    if not config.use_title_generation:
+    if not rag_config.use_title_generation:
         return {"conversation_title": None, "hidden_environment": state.get("hidden_environment", {})}
 
     question = state["question"]
