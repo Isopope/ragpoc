@@ -29,7 +29,14 @@ TOOLS_CFG: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Mots-clés de recherche."}
+                    "query": {"type": "string", "description": "Mots-clés de recherche."},
+                    "source_name": {
+                        "type": "string",
+                        "description": (
+                            "Nom du fichier cible si tu veux limiter cette recherche à un document précis. "
+                            "Laisse vide pour chercher dans toute la base."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -125,6 +132,10 @@ def _build_initial_prompt(state: UnifiedRAGState) -> str:
         sources_info = f"Documents indexés: {', '.join(names)}."
         if state.get("source_filter"):
             sources_info += f" (Filtré sur {Path(state['source_filter']).name})"
+        elif state.get("target_sources"):
+            target_names = [Path(s).name for s in state.get("target_sources", [])]
+            if target_names:
+                sources_info += f" Documents explicitement ciblés: {', '.join(target_names)}."
 
     plans = " - " + "\n - ".join(state.get("sub_queries", [state["question"]]))
 
@@ -151,6 +162,7 @@ def _build_initial_prompt(state: UnifiedRAGState) -> str:
         "RÈGLES STRICTES :\n"
         f"{first_rule}"
         "2. Si un extrait semble coupé ou incomplet, utilise 'get_neighboring_chunk'.\n"
+        "   Si la question compare plusieurs documents, appelle 'search_documents' plusieurs fois avec 'source_name' pour chaque document.\n"
         "3. Écris ton raisonnement AVANT chaque appel d'outil ou décision finale.\n"
         "4. Varie les formulations de recherche pour couvrir tous les aspects de la question.\n"
         "5. Quand les extraits récupérés suffisent à répondre, dis 'RECHERCHE_TERMINEE'.\n"
@@ -238,6 +250,7 @@ def agent_action(
     seen_keys    = set(state.get("seen_keys", set()))
     seen_queries = list(state.get("seen_queries", []))
     filter_      = state.get("source_filter")
+    target_sources = state.get("target_sources", [])
 
     model_content    = messages[-1]
     fn_calls         = model_content.get("tool_calls") or []
@@ -251,15 +264,27 @@ def agent_action(
         # ── search_documents ──────────────────────────────────────────────────
         if fc_name == "search_documents":
             query = fc_args.get("query", "")
-            is_dup = any(q.lower().strip() == query.lower().strip() for q, _ in seen_queries)
-            seen_queries.append((query, 1.0))
+            requested_source_name = str(fc_args.get("source_name") or "").strip()
+            resolved_source = (
+                filter_
+                or next((s for s in target_sources if Path(s).name.lower() == requested_source_name.lower()), None)
+                or next((s for s in state.get("available_sources", []) if Path(s).name.lower() == requested_source_name.lower()), None)
+            )
+            query_signature = f"{requested_source_name.lower()}::{query.lower().strip()}"
+            is_dup = any(q.lower().strip() == query_signature for q, _ in seen_queries)
+            seen_queries.append((query_signature, 1.0))
 
             if is_dup:
                 result = {"found": 0, "results": [], "notice": "Requête déjà effectuée, essaie une formulation différente."}
-                log.append(log_entry("agent.action", f"Skip query (duplicate): {query[:50]}"))
+                log.append(log_entry("agent.action", f"Skip query (duplicate): {query[:50]} / {requested_source_name or 'all'}"))
             else:
                 try:
-                    merged     = query_tool.execute(query, source_filter=filter_, top_k=rag_config.top_k_retrieve, alpha=rag_config.hybrid_alpha)
+                    merged     = query_tool.execute(
+                        query,
+                        source_filter=resolved_source,
+                        top_k=rag_config.top_k_retrieve,
+                        alpha=rag_config.hybrid_alpha,
+                    )
                     new_count  = 0
                     chunks_info: list[dict] = []
 
@@ -282,16 +307,22 @@ def agent_action(
                     result = {"found": len(merged), "new_chunks": new_count, "results": chunks_info[:10]}
                     log.append(log_entry(
                         "agent.action",
-                        f"Recherche '{query[:50]}' → {len(merged)} hits ({new_count} nouveaux)",
-                        {"query": query, "found": len(merged), "new": new_count},
+                        f"Recherche '{query[:50]}' sur {requested_source_name or 'toute la base'} → {len(merged)} hits ({new_count} nouveaux)",
+                        {
+                            "query": query,
+                            "source_name": requested_source_name or None,
+                            "resolved_source": resolved_source,
+                            "found": len(merged),
+                            "new": new_count,
+                        },
                     ))
                 except Exception as exc:
                     result = {"error": f"Recherche échouée: {exc}"}
                     logger.error("[{}] agent_action search '{}': {}", qid, query[:50], exc)
                     log.append(log_entry(
                         "agent.action",
-                        f"ERREUR search '{query[:50]}': {exc}",
-                        {"query": query, "error": str(exc)},
+                        f"ERREUR search '{query[:50]}' sur {requested_source_name or 'toute la base'}: {exc}",
+                        {"query": query, "source_name": requested_source_name or None, "error": str(exc)},
                     ))
 
         # ── get_neighboring_chunk ─────────────────────────────────────────────

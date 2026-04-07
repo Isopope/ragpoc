@@ -75,6 +75,9 @@ class UnifiedRAGState(TypedDict):
     source_filter: Optional[str]
     """Si défini, restreint toutes les recherches à ce chemin de source."""
 
+    target_sources: list[str]
+    """Documents explicitement ciblés par la planification, résolus en chemins complets."""
+
     conversation_summary: str
     """Résumé des tours précédents, injecté dans planning et génération (fourni par app.py)."""
 
@@ -205,6 +208,7 @@ def create_unified_state(
         question=question,
         available_sources=available_sources or [],
         source_filter=source,
+        target_sources=[source] if source else [],
         conversation_summary=conversation_summary,
         collection_metadata=collection_metadata or {},
         collection_names=collection_names or ["RagChunk"],

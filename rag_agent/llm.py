@@ -144,9 +144,9 @@ def parse_json_llm(text: str) -> object:
 class PlanningOutput(BaseModel):
     """Sortie structurée du nœud analyze_and_plan."""
 
-    target: Optional[str] = Field(
-        default=None,
-        description="Nom de fichier cible si mentionné explicitement, sinon null",
+    targets: list[str] = Field(
+        default_factory=list,
+        description="Noms de fichiers explicitement mentionnés et pertinents pour la question",
     )
     reason: str = Field(
         default="",
@@ -168,6 +168,16 @@ class PlanningOutput(BaseModel):
         if not v:
             raise ValueError("sub_queries doit contenir au moins une requête")
         return v[:3]  # max 3 sous-requêtes
+
+    @field_validator("targets")
+    @classmethod
+    def normalize_targets(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for item in v:
+            text = str(item).strip()
+            if text and text.lower() != "null" and text not in cleaned:
+                cleaned.append(text)
+        return cleaned
 
 
 class DecisionOutput(BaseModel):

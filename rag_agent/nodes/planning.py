@@ -30,10 +30,11 @@ def _build_planning_prompt(
         "3. Chaque sous-requête doit être grammaticalement correcte et en français.\n"
         "4. Si la question est complexe, la décomposer en 2-3 aspects distincts. Sinon, générer 1 seule sous-requête.\n"
         "5. Si la question fait référence à quelque chose mentionné dans la conversation précédente, l'intégrer explicitement dans la sous-requête.\n"
-        "6. Si un nom de fichier est explicitement mentionné parmi les documents disponibles, indique-le dans \"target\". Sinon \"null\".\n\n"
+        "6. Si un ou plusieurs noms de fichiers sont explicitement mentionnés parmi les documents disponibles, indique-les dans \"targets\". Sinon [].\n"
+        "7. En cas de comparaison entre plusieurs documents, conserve-les tous dans \"targets\" et n'en choisis pas un seul arbitrairement.\n\n"
         "Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :\n"
         '{\n'
-        '  "target": "<nom_fichier_ou_null>",\n'
+        '  "targets": ["<nom_fichier_1>", "<nom_fichier_2>"],\n'
         '  "reason": "<explication courte>",\n'
         '  "sub_queries": ["<requête_1>", "<requête_2>"],\n'
         '  "confidence": 0.9\n'
@@ -52,6 +53,18 @@ def _resolve_source_filter(
         if Path(s).name == target_name:
             return s
     return None
+
+
+def _resolve_source_filters(
+    target_names: list[str],
+    sources: list[str],
+) -> list[str]:
+    resolved: list[str] = []
+    for target_name in target_names:
+        target = _resolve_source_filter(target_name, sources)
+        if target and target not in resolved:
+            resolved.append(target)
+    return resolved
 
 
 def analyze_and_plan(state: UnifiedRAGState, *, llm_call: Callable, rag_config: RAGConfig) -> dict:
@@ -82,6 +95,13 @@ def analyze_and_plan(state: UnifiedRAGState, *, llm_call: Callable, rag_config: 
             )
             raw           = resp.choices[0].message.content or "{}"
             pre_parsed    = parse_json_llm(raw)
+            if isinstance(pre_parsed, dict) and "targets" not in pre_parsed and "target" in pre_parsed:
+                legacy_target = pre_parsed.get("target")
+                pre_parsed["targets"] = (
+                    [legacy_target]
+                    if isinstance(legacy_target, str) and legacy_target.strip() and legacy_target.lower() != "null"
+                    else []
+                )
             parsed_output = PlanningOutput.model_validate(pre_parsed)
             break
         except Exception as exc:
@@ -99,18 +119,24 @@ def analyze_and_plan(state: UnifiedRAGState, *, llm_call: Callable, rag_config: 
             "decision_log":   log,
         }
 
-    resolved_filter = _resolve_source_filter(parsed_output.target, sources)
-    final_filter    = filter_ or resolved_filter
+    resolved_targets = _resolve_source_filters(parsed_output.targets, sources)
+    final_filter     = filter_ or (resolved_targets[0] if len(resolved_targets) == 1 else None)
 
     log.append(log_entry(
         "analyze",
-        f"Filtre : {parsed_output.target or 'aucun'}. Requêtes : {parsed_output.sub_queries}",
-        {"target": final_filter, "sub_queries": parsed_output.sub_queries, "reason": parsed_output.reason},
+        f"Cibles : {parsed_output.targets or ['aucune']}. Requêtes : {parsed_output.sub_queries}",
+        {
+            "target": final_filter,
+            "targets": resolved_targets,
+            "sub_queries": parsed_output.sub_queries,
+            "reason": parsed_output.reason,
+        },
     ))
 
     return {
         "sub_queries":    parsed_output.sub_queries,
         "source_filter":  final_filter,
+        "target_sources": resolved_targets,
         "reasoning":      parsed_output.reason,
         "current_branch": "plan",
         "decision_history": list(state.get("decision_history", [])) + ["plan.analyze"],

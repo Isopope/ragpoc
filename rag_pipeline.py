@@ -278,6 +278,7 @@ class RAGState(TypedDict):
     question:           str
     available_sources:  list[str]
     source_filter:      str | None
+    target_sources:     list[str]
     sub_queries:        list[str]       # Sous-requêtes planifiées issues de l'analyse
     messages:           list[Any]       # Historique LLM (OpenAI) pour la boucle
     all_docs:           list[dict]      # Chunks bruts collectés
@@ -405,6 +406,26 @@ def build_rag_graph(
             raise result["error"]
         return result["vector"]
 
+    def _resolve_sources_by_names(target_names: list[str], sources: list[str]) -> list[str]:
+        """Résout une liste de noms de fichiers vers leurs chemins complets."""
+        resolved: list[str] = []
+        normalized = {Path(s).name.lower(): s for s in sources}
+        for name in target_names:
+            key = (name or "").strip().lower()
+            if key and key in normalized and normalized[key] not in resolved:
+                resolved.append(normalized[key])
+        return resolved
+
+    def _resolve_source_by_name(source_name: str | None, sources: list[str]) -> str | None:
+        """Résout un nom de fichier vers son chemin complet."""
+        if not source_name:
+            return None
+        target = source_name.strip().lower()
+        for src in sources:
+            if Path(src).name.lower() == target:
+                return src
+        return None
+
         # ── Nœud 1 : Planification & Reformulation ───────────────────────────────
     def analyze_and_plan(state: RAGState) -> dict:
         """S'inspire de 'rewrite_query' : décompose la question en sous-requêtes 
@@ -434,16 +455,17 @@ RÈGLES DE REFORMULATION (strictes) :
 3. Chaque sous-requête doit être grammaticalement correcte et en français.
 4. Si la question est complexe, la décomposer en 2-3 aspects distincts. Sinon, générer 1 seule sous-requête.
 5. Si la question fait référence à quelque chose mentionné dans la conversation précédente, l'intégrer explicitement dans la sous-requête.
-6. Si un nom de fichier est explicitement mentionné parmi les documents disponibles, indique-le dans "target". Sinon "null".
+6. Si un ou plusieurs noms de fichiers sont explicitement mentionnés parmi les documents disponibles, indique-les dans "targets". Sinon [].
+7. En cas de comparaison entre plusieurs documents, conserve-les tous dans "targets" et n'en choisis pas un seul arbitrairement.
 
 Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
 {{
-  "target": "<nom_fichier_ou_null>",
+  "targets": ["<nom_fichier_1>", "<nom_fichier_2>"],
   "reason": "<explication courte>",
   "sub_queries": ["<requête_1>", "<requête_2>"]
 }}"""
 
-        target_name = None
+        target_names: list[str] = []
         sub_queries = []
         reason = "analyse standard"
 
@@ -456,7 +478,15 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
             )
             parsed = _parse_json_llm(resp.choices[0].message.content or "{}")
             if isinstance(parsed, dict):
-                target_name = parsed.get("target")
+                raw_targets = parsed.get("targets")
+                if isinstance(raw_targets, str):
+                    target_names = [raw_targets]
+                elif isinstance(raw_targets, list):
+                    target_names = [str(name) for name in raw_targets if str(name).strip()]
+                else:
+                    legacy_target = parsed.get("target")
+                    if isinstance(legacy_target, str) and legacy_target.lower() != "null":
+                        target_names = [legacy_target]
                 sub_queries = parsed.get("sub_queries", [])
                 reason      = parsed.get("reason", reason)
                 if isinstance(sub_queries, str):
@@ -464,22 +494,31 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
         except Exception as exc:
             logger.warning("[{}] analyze_and_plan — erreur LLM : {}", qid, exc)
 
-        if not filter_ and target_name and target_name.lower() != "null":
-            for s in sources:
-                if Path(s).name == target_name:
-                    filter_ = s
-                    break
+        resolved_targets = _resolve_sources_by_names(target_names, sources)
+        target_filter = filter_
+        if not filter_ and len(resolved_targets) == 1:
+            target_filter = resolved_targets[0]
 
         if not sub_queries:
             sub_queries = [question]
 
         log.append(_log_entry(
             "analyze",
-            f"Filtre : {target_name or 'aucun'}. Requêtes : {sub_queries}",
-            {"target": filter_, "sub_queries": sub_queries, "reason": reason},
+            f"Cibles : {target_names or ['aucune']}. Requêtes : {sub_queries}",
+            {
+                "target": target_filter,
+                "targets": resolved_targets,
+                "sub_queries": sub_queries,
+                "reason": reason,
+            },
         ))
         
-        return {"source_filter": filter_, "sub_queries": sub_queries[:3], "decision_log": log}
+        return {
+            "source_filter": target_filter,
+            "target_sources": resolved_targets,
+            "sub_queries": sub_queries[:3],
+            "decision_log": log,
+        }
 
     # ── Initialisation des Outils  ────────────────────────────────────────────
     tools_cfg = [
@@ -495,7 +534,14 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Mots-clés de recherche."}
+                        "query": {"type": "string", "description": "Mots-clés de recherche."},
+                        "source_name": {
+                            "type": "string",
+                            "description": (
+                                "Nom du fichier cible si tu veux limiter cette recherche à un document précis. "
+                                "Laisse vide pour chercher dans toute la base."
+                            ),
+                        },
                     },
                     "required": ["query"],
                 },
@@ -536,6 +582,10 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
                 sources_info = f"Documents indexés: {', '.join(names)}."
                 if state.get("source_filter"):
                     sources_info += f" (Filtré sur {Path(state['source_filter']).name})"
+                elif state.get("target_sources"):
+                    target_names = [Path(s).name for s in state.get("target_sources", [])]
+                    if target_names:
+                        sources_info += f" Documents explicitement ciblés: {', '.join(target_names)}."
 
             current_docs = len(state.get("all_docs", []))
             no_progress = state.get("consecutive_no_progress", 0)
@@ -569,6 +619,7 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
                 "RÈGLES STRICTES :\n"
                 f"{first_rule}"
                 "2. Si un extrait semble coupé ou incomplet, utilise 'get_neighboring_chunk'.\n"
+                "   Si la question compare plusieurs documents, appelle 'search_documents' plusieurs fois avec 'source_name' pour chaque document.\n"
                 "3. Avant un appel d'outil, écris AU PLUS une phrase courte de raisonnement.\n"
                 "4. N'appelle PAS un outil si tu as déjà assez d'éléments pour répondre.\n"
                 "5. Quand les extraits récupérés suffisent à répondre, dis 'RECHERCHE_TERMINEE'.\n"
@@ -630,6 +681,7 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
         seen_queries = list(state.get("seen_queries", []))
         consecutive_no_progress = state.get("consecutive_no_progress", 0)
         filter_ = state.get("source_filter")
+        target_sources = state.get("target_sources", [])
         action_new_docs = 0
         action_made_progress = False
         
@@ -645,25 +697,32 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
             result = {}
             if fc_name == "search_documents":
                 query = fc_args.get("query", "")
+                requested_source_name = (fc_args.get("source_name") or "").strip()
+                resolved_source = (
+                    filter_
+                    or _resolve_source_by_name(requested_source_name, target_sources)
+                    or _resolve_source_by_name(requested_source_name, state.get("available_sources", []))
+                )
+                query_signature = f"{requested_source_name.lower()}::{query.lower().strip()}"
                 # Déduplication : vérifier AVANT d'ajouter à l'historique
                 is_duplicate = any(
-                    q.lower().strip() == query.lower().strip() for q, _ in seen_queries
+                    q.lower().strip() == query_signature for q, _ in seen_queries
                 )
-                seen_queries.append((query, 1.0))
+                seen_queries.append((query_signature, 1.0))
 
                 if is_duplicate:
                     result = {"found": 0, "results": [], "notice": "Requête déjà effectuée, essaie une formulation différente."}
-                    log.append(_log_entry("agent.action", f"Skip query (duplicate): {query[:50]}"))
+                    log.append(_log_entry("agent.action", f"Skip query (duplicate): {query[:50]} / {requested_source_name or 'all'}"))
                 else:
                     try:
                         vector = _embed_with_timeout(query.strip() or " ", timeout=llm_timeout)
                         sem_docs = _weaviate_with_retry(
                             weaviate_store.hybrid_search, query=query, query_vector=vector,
-                            top_k=top_k_retrieve, alpha=hybrid_alpha, source=filter_
+                            top_k=top_k_retrieve, alpha=hybrid_alpha, source=resolved_source
                         )
                         kw_docs = _weaviate_with_retry(
                             weaviate_store.hybrid_search, query=query, query_vector=vector,
-                            top_k=top_k_retrieve, alpha=max(0.0, round(hybrid_alpha - 0.3, 1)), source=filter_
+                            top_k=top_k_retrieve, alpha=max(0.0, round(hybrid_alpha - 0.3, 1)), source=resolved_source
                         )
                         merged = _weighted_rrf([sem_docs, kw_docs], [1.0, 0.5])
 
@@ -690,8 +749,14 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
                         action_made_progress = action_made_progress or (new_count > 0)
                         log.append(_log_entry(
                             "agent.action",
-                            f"Recherche '{query[:50]}' → {len(merged)} hits ({new_count} nouveaux)",
-                            {"query": query, "found": len(merged), "new": new_count},
+                            f"Recherche '{query[:50]}' sur {requested_source_name or 'toute la base'} → {len(merged)} hits ({new_count} nouveaux)",
+                            {
+                                "query": query,
+                                "source_name": requested_source_name or None,
+                                "resolved_source": resolved_source,
+                                "found": len(merged),
+                                "new": new_count,
+                            },
                         ))
                     except Exception as e:
                         error_msg = f"Recherche échouée: {e}"
@@ -699,8 +764,8 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
                         logger.error("[{}] agent_action — search '{}': {}", qid, query[:50], e)
                         log.append(_log_entry(
                             "agent.action",
-                            f"ERREUR search '{query[:50]}': {e}",
-                            {"query": query, "error": str(e)},
+                            f"ERREUR search '{query[:50]}' sur {requested_source_name or 'toute la base'}: {e}",
+                            {"query": query, "source_name": requested_source_name or None, "error": str(e)},
                         ))
             
             elif fc_name == "get_neighboring_chunk":
@@ -1178,6 +1243,7 @@ class RAGAgent:
             "question":             question,
             "available_sources":    available_sources,
             "source_filter":        source,
+            "target_sources":       [source] if source else [],
             "sub_queries":          [],
             "messages":             [],
             "all_docs":             [],
@@ -1229,6 +1295,7 @@ class RAGAgent:
             "question":             question,
             "available_sources":    available_sources,
             "source_filter":        source,
+            "target_sources":       [source] if source else [],
             "sub_queries":          [],
             "messages":             [],
             "all_docs":             [],
