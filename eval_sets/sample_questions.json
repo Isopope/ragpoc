@@ -1,23 +1,91 @@
 [
   {
-    "id": "budget_2024",
-    "question": "que'est ce que le PRI ?",
-    "expected_elements": ["budget", "2024"],
-    "tags": ["factuel", "budget"],
-    "notes": "Question factuelle simple pour verifier la precision retrieval + generation."
-  },
-  {
-    "id": "manuel_dev",
-    "question": "Quels sont les matieres du semestre 8 ?",
+    "id": "pri_definition",
+    "question": "Qu'est-ce que le PRI ?",
     "source": null,
-    "expected_elements": ["developpeur", "manuel"],
-    "tags": ["resume", "documentation"]
+    "expected_answer": "Le PRI (Projet de Recherche et d'Innovation) est un projet académique réalisé par les étudiants de Polytech, généralement en dernière année, qui consiste à mener un travail de recherche appliquée ou d'innovation sur une problématique concrète.",
+    "expected_chunks_keywords": ["PRI", "projet", "recherche", "innovation"],
+    "expected_source_names": ["rapportPRI.pdf"],
+    "tags": ["factuel", "définition"],
+    "difficulty": "easy",
+    "notes": "Question factuelle simple pour vérifier la précision retrieval + generation."
   },
   {
-    "id": "follow_up_budget",
-    "question": "que sont les polypoints ?",
-    "conversation_summary": "L'utilisateur vient de demander le budget 2024 et la reponse precedente parlait du document budget.pdf.",
-    "expected_elements": ["priorite"],
-    "tags": ["follow-up", "contexte"]
+    "id": "matieres_s8",
+    "question": "Quels sont les matières du semestre 8 ?",
+    "source": null,
+    "expected_answer": "Les matières du semestre 8 incluent les enseignements de la spécialité DI (Data et Intelligence) tels que définis dans le livret de spécialité.",
+    "expected_chunks_keywords": ["semestre 8", "S8", "matière", "UE", "cours"],
+    "expected_source_names": ["Livret_Specialite_DI_2025-2026_VF (1).pdf", "Livret_Specialite_DI_2025-2026_VF.pdf"],
+    "tags": ["factuel", "programme"],
+    "difficulty": "easy",
+    "notes": "Vérifie la capacité à retrouver le programme d'un semestre spécifique."
+  },
+  {
+    "id": "polypoints",
+    "question": "Que sont les polypoints ?",
+    "conversation_summary": "L'utilisateur vient de demander le budget 2024 et la réponse précédente parlait du document budget.pdf.",
+    "source": null,
+    "expected_answer": "Les polypoints sont un système de points utilisé dans le contexte académique de Polytech.",
+    "expected_chunks_keywords": ["polypoint"],
+    "expected_source_names": [],
+    "tags": ["follow-up", "contexte"],
+    "difficulty": "medium",
+    "notes": "Question de suivi nécessitant la résolution du contexte conversationnel."
+  },
+  {
+    "id": "budget_2024",
+    "question": "Quel est le budget programme de l'État pour 2024-2026 ?",
+    "source": null,
+    "expected_answer": "Le budget-programme de l'État pour la période 2024-2026 décrit les allocations budgétaires par programme et par ministère.",
+    "expected_chunks_keywords": ["budget", "programme", "2024", "2026", "État"],
+    "expected_source_names": ["Budget-programme-de-lEtat-2024-2026-min.pdf"],
+    "tags": ["factuel", "budget"],
+    "difficulty": "easy",
+    "notes": "Question factuelle sur le document budget."
+  },
+  {
+    "id": "guide_deploiement",
+    "question": "Quelles sont les étapes de déploiement décrites dans le guide ?",
+    "source": null,
+    "expected_answer": "Le guide de déploiement décrit les étapes nécessaires pour mettre en production l'application.",
+    "expected_chunks_keywords": ["déploiement", "étape", "installation", "configuration"],
+    "expected_source_names": ["guide_deploiement.pdf"],
+    "tags": ["procédure", "technique"],
+    "difficulty": "medium",
+    "notes": "Question procédurale qui nécessite de retrouver les étapes séquentielles."
+  },
+  {
+    "id": "comparaison_docs",
+    "question": "Quelles sont les différences entre le manuel développeur et le manuel utilisateur ?",
+    "source": null,
+    "expected_answer": "Le manuel développeur est destiné aux développeurs et couvre l'architecture technique, le code et les APIs. Le manuel utilisateur est destiné aux utilisateurs finaux et décrit les fonctionnalités et l'interface.",
+    "expected_chunks_keywords": ["développeur", "utilisateur", "manuel"],
+    "expected_source_names": ["manuel_developpeur.pdf", "manuel_utilisateur.pdf"],
+    "tags": ["comparaison", "multi-doc"],
+    "difficulty": "hard",
+    "notes": "Question de comparaison multi-documents — teste la capacité à chercher dans plusieurs sources."
+  },
+  {
+    "id": "conges_info",
+    "question": "Quelles sont les règles concernant les congés ?",
+    "source": null,
+    "expected_answer": "Les règles concernant les congés incluent les modalités de prise de congés, les types de congés disponibles et les procédures à suivre.",
+    "expected_chunks_keywords": ["congé", "absence", "jour"],
+    "expected_source_names": [],
+    "tags": ["RH", "procédure"],
+    "difficulty": "medium",
+    "notes": "Question RH qui teste la recherche dans les documents de type conditions/règlement."
+  },
+  {
+    "id": "question_hors_sujet",
+    "question": "Quelle est la capitale du Japon ?",
+    "source": null,
+    "expected_answer": "Cette information n'est pas présente dans les documents indexés.",
+    "expected_chunks_keywords": [],
+    "expected_source_names": [],
+    "tags": ["hors-sujet", "négatif"],
+    "difficulty": "easy",
+    "notes": "Question hors périmètre — teste la capacité du système à dire qu'il ne sait pas."
   }
 ]

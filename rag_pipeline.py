@@ -28,6 +28,7 @@ import json
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -517,6 +518,144 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
             "source_filter": target_filter,
             "target_sources": resolved_targets,
             "sub_queries": sub_queries[:3],
+            "decision_log": log,
+        }
+
+    # ── Nœud 1b : Recherche initiale parallèle ───────────────────────────────
+    def parallel_initial_retrieval(state: RAGState) -> dict:
+        """Pré-charge le contexte en exécutant toutes les sub_queries en parallèle.
+
+        Inspiré du SearchTool d'Onyx qui parallélise :
+        1. Query expansion (sémantique + keyword) en parallèle
+        2. Recherches multi-queries en parallèle
+        3. Fusion via Weighted RRF
+
+        Ce nœud s'exécute AVANT la boucle ReAct pour réduire la latence :
+        - Sans parallélisation : N × (embed + 2× search)
+        - Avec parallélisation : 1 × (embed + 2× search)  (grâce au ThreadPool)
+
+        L'agent ReAct peut ensuite compléter les lacunes de manière ciblée.
+        """
+        qid = state["question_id"]
+        log = list(state.get("decision_log", []))
+        sub_queries = state.get("sub_queries", [state["question"]])
+        filter_ = state.get("source_filter")
+        target_sources = state.get("target_sources", [])
+        all_docs: list[dict] = []
+        seen_keys: set[tuple[str, int]] = set()
+        seen_queries: list[tuple[str, float]] = []
+
+        # Construire la liste des recherches à exécuter
+        # Chaque sub_query → 1 embedding + 2 recherches (sémantique + keyword) + wRRF
+        queries_to_run = list(dict.fromkeys(sub_queries))  # Dédupliquer en gardant l'ordre
+
+        # Si des cibles spécifiques sont définies mais pas de filtre global,
+        # dupliquer les recherches pour chaque cible
+        search_tasks: list[tuple[str, str | None, float]] = []
+        if target_sources and not filter_:
+            for query in queries_to_run:
+                for target in target_sources:
+                    search_tasks.append((query, target, 1.0))
+                # Aussi chercher sans filtre pour couvrir les docs non ciblés
+                if len(target_sources) > 1:
+                    search_tasks.append((query, None, 0.5))
+        else:
+            for query in queries_to_run:
+                search_tasks.append((query, filter_, 1.0))
+
+        start_time = time.perf_counter()
+
+        def _search_single(query: str, source: str | None) -> list[dict]:
+            """Exécute une recherche hybride complète pour une requête."""
+            vector = _embed_with_timeout(query.strip() or " ", timeout=llm_timeout)
+            sem_docs = _weaviate_with_retry(
+                weaviate_store.hybrid_search,
+                query=query,
+                query_vector=vector,
+                top_k=top_k_retrieve,
+                alpha=hybrid_alpha,
+                source=source,
+            )
+            kw_docs = _weaviate_with_retry(
+                weaviate_store.hybrid_search,
+                query=query,
+                query_vector=vector,
+                top_k=top_k_retrieve,
+                alpha=max(0.0, round(hybrid_alpha - 0.3, 1)),
+                source=source,
+            )
+            return _weighted_rrf([sem_docs, kw_docs], [1.0, 0.5])
+
+        # ── Exécution parallèle ──────────────────────────────────────────────
+        all_result_lists: list[list[dict]] = []
+        all_weights: list[float] = []
+        errors: list[str] = []
+
+        max_workers = min(len(search_tasks), 6)  # Plafond à 6 threads
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_task = {
+                pool.submit(_search_single, query, source): (query, source, weight)
+                for query, source, weight in search_tasks
+            }
+            for future in as_completed(future_to_task):
+                query, source, weight = future_to_task[future]
+                try:
+                    results = future.result()
+                    all_result_lists.append(results)
+                    all_weights.append(weight)
+                    # Track la requête comme déjà vue pour éviter les doublons dans la boucle ReAct
+                    src_name = Path(source).name.lower() if source else ""
+                    seen_queries.append((f"{src_name}::{query.lower().strip()}", weight))
+                except Exception as exc:
+                    source_label = Path(source).name if source else "all"
+                    errors.append(f"{query[:40]}@{source_label}: {exc}")
+                    logger.warning(
+                        "[{}] parallel_retrieval — erreur sur '{}': {}",
+                        qid, query[:40], exc,
+                    )
+
+        # ── Fusion globale via wRRF ──────────────────────────────────────────
+        if all_result_lists:
+            merged = _weighted_rrf(all_result_lists, all_weights)
+            for doc in merged:
+                k = (doc.get("source", ""), int(doc.get("chunk_index", -1)))
+                if k not in seen_keys:
+                    all_docs.append(doc)
+                    seen_keys.add(k)
+
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+
+        log.append(_log_entry(
+            "parallel_retrieval",
+            (
+                f"{len(search_tasks)} recherches en parallèle ({max_workers} workers) "
+                f"→ {len(all_docs)} chunks uniques en {elapsed_ms}ms"
+            ),
+            {
+                "queries": [q for q, _, _ in search_tasks],
+                "n_tasks": len(search_tasks),
+                "n_results": len(all_docs),
+                "elapsed_ms": elapsed_ms,
+                "errors": errors,
+            },
+        ))
+
+        if errors:
+            log.append(_log_entry(
+                "parallel_retrieval.errors",
+                f"{len(errors)} erreur(s) pendant le retrieval initial",
+                {"errors": errors},
+            ))
+
+        logger.info(
+            "[{}] Parallel initial retrieval: {} queries → {} chunks in {}ms",
+            qid, len(search_tasks), len(all_docs), elapsed_ms,
+        )
+
+        return {
+            "all_docs": all_docs,
+            "seen_keys": seen_keys,
+            "seen_queries": seen_queries,
             "decision_log": log,
         }
 
@@ -1146,16 +1285,18 @@ Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :
         return {"answer": answer, "error": None, "decision_log": log}
 
     builder = StateGraph(RAGState)
-    builder.add_node("analyze_and_plan", analyze_and_plan)
-    builder.add_node("agent_reason",     agent_reason)
-    builder.add_node("agent_action",     agent_action)
-    builder.add_node("compress_context", compress_context)
-    builder.add_node("consolidate",      consolidate_chunks)
-    builder.add_node("rerank",           rerank)
-    builder.add_node("generate",         generate)
+    builder.add_node("analyze_and_plan",           analyze_and_plan)
+    builder.add_node("parallel_initial_retrieval", parallel_initial_retrieval)
+    builder.add_node("agent_reason",               agent_reason)
+    builder.add_node("agent_action",               agent_action)
+    builder.add_node("compress_context",           compress_context)
+    builder.add_node("consolidate",                consolidate_chunks)
+    builder.add_node("rerank",                     rerank)
+    builder.add_node("generate",                   generate)
 
-    builder.add_edge(START,              "analyze_and_plan")
-    builder.add_edge("analyze_and_plan", "agent_reason")
+    builder.add_edge(START,                        "analyze_and_plan")
+    builder.add_edge("analyze_and_plan",           "parallel_initial_retrieval")
+    builder.add_edge("parallel_initial_retrieval", "agent_reason")
 
     # Boucle ReAct : Reason -> Action ou Sortie
     builder.add_conditional_edges("agent_reason", route_agent, {

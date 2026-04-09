@@ -127,6 +127,7 @@ class BattleRoyaleRunner:
             raw_result = {
                 "answer": "",
                 "sources": [],
+                "retrieved_docs": [],
                 "decision_log": [],
                 "error": error,
             }
@@ -136,6 +137,11 @@ class BattleRoyaleRunner:
         sources = raw_result.get("sources") or []
         decision_log = raw_result.get("decision_log") or []
         matched_expected = _count_expected_elements(answer, question.expected_elements)
+
+        # Garantir que retrieved_docs est toujours présent dans raw_result
+        # (certains backends ne le renvoient pas explicitement)
+        if "retrieved_docs" not in raw_result:
+            raw_result["retrieved_docs"] = sources
 
         return RunResult(
             run_id=run_id,
