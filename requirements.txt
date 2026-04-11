@@ -1,8 +1,9 @@
 # Vector DB
 weaviate-client>=4.5,<5.0
 
-# LLM + Embeddings (OpenAI)
+# LLM + Embeddings (OpenAI & other providers via LiteLLM)
 openai>=1.50
+litellm>=1.0.0
 
 # Agent RAG (LangGraph)
 langgraph>=0.2

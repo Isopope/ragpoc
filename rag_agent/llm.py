@@ -15,71 +15,49 @@ import json
 import re
 import threading
 from typing import Any, Callable, Optional
-
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
-
 
 # ── Helpers timeout ────────────────────────────────────────────────────────────
 
 def make_llm_caller(client, model: str, timeout: float) -> Callable:
-    """Retourne une fonction d'appel LLM wrappée dans un thread avec timeout.
-
-    Pattern identique à _llm_call_with_timeout de rag_pipeline.py:344-371.
-    """
+    """Retourne une fonction d'appel LLM via LiteLLM avec timeout."""
     def _call(messages: list, **kwargs) -> Any:
-        result: dict = {"response": None, "error": None}
-
-        def _run():
-            try:
-                result["response"] = client.chat.completions.create(
-                    model=model, messages=messages, **kwargs
-                )
-            except Exception as exc:
-                result["error"] = exc
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-
-        if t.is_alive():
-            raise TimeoutError(f"LLM timeout après {timeout}s")
-        if result["error"]:
-            raise result["error"]
-        return result["response"]
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from llm import get_llm_completion
+        
+        # LITELLM automatically manages providers
+        api_key = getattr(client, "api_key", None) if client else None
+        
+        # Extraire `response_format` si nécessaire pour la compatibilité avec certains modèles (comme OpenAI)
+        response_format = kwargs.pop("response_format", None)
+        
+        # Pour les modèles qui permettent `response_format`
+        if response_format and model.startswith("gpt"):
+           kwargs["response_format"] = response_format
+           
+        resp = get_llm_completion(
+            model=model,
+            messages=messages,
+            timeout=timeout,
+            api_key=api_key,
+            **kwargs
+        )
+        return resp
 
     return _call
 
 
 def make_embedder(client, model: str, timeout: float) -> Callable:
-    """Retourne une fonction d'embedding wrappée dans un thread avec timeout.
-
-    Pattern identique à _embed_with_timeout de rag_pipeline.py:373-399.
-    """
-    def _embed(text: str) -> list[float]:
-        result: dict = {"vector": None, "error": None}
-
-        def _run():
-            try:
-                resp = client.embeddings.create(model=model, input=text or " ")
-                result["vector"] = resp.data[0].embedding
-            except Exception as exc:
-                result["error"] = exc
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-
-        if t.is_alive():
-            raise TimeoutError(f"Embedding timeout après {timeout}s")
-        if result["error"]:
-            raise result["error"]
-        return result["vector"]
-
-    return _embed
-
-
-# ── Parser JSON robuste ────────────────────────────────────────────────────────
+    """Retourne une fonction d'embedding via LiteLLM."""
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from llm import make_embedder as get_embedder_factory
+    
+    return get_embedder_factory(client, model, timeout)
 
 def _strip_fences(text: str) -> str:
     """Retire les balises Markdown ``` éventuellement ajoutées par le LLM."""

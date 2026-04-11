@@ -1,4 +1,4 @@
-"""Interface Streamlit pour le POC RAG — Weaviate hybride + OpenAI."""
+"""Interface Streamlit pour le POC RAG — Weaviate hybride + LiteLLM multi-provider."""
 from __future__ import annotations
 
 import atexit
@@ -16,6 +16,7 @@ load_dotenv()
 WEAVIATE_HOST   = os.getenv("WEAVIATE_HOST", "localhost")
 WEAVIATE_PORT   = int(os.getenv("WEAVIATE_PORT", "8080"))
 LLM_MODEL       = os.getenv("LLM_MODEL", "gpt-4.1")
+LLM_PROVIDER    = os.getenv("LLM_PROVIDER", "openai")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 TOP_K_RETRIEVE  = int(os.getenv("TOP_K_RETRIEVE", "20"))
 TOP_K_FINAL     = int(os.getenv("TOP_K_FINAL", "5"))
@@ -66,27 +67,43 @@ def _get_openai():
     return api_key
 
 
+def _llm_provider_ready() -> bool:
+    """Vérifie que la clé/URL du provider LLM actif est renseignée."""
+    provider = os.getenv("LLM_PROVIDER", "openai")
+    if provider == "openai":
+        return bool(os.getenv("OPENAI_API_KEY"))
+    if provider == "mistral":
+        return bool(os.getenv("MISTRAL_API_KEY"))
+    if provider == "claude":
+        return bool(os.getenv("ANTHROPIC_API_KEY"))
+    if provider == "ollama":
+        return bool(os.getenv("OLLAMA_API_BASE", "http://localhost:11434"))
+    return False
+
+
 @st.cache_resource
 def _get_agent():
     store      = _get_store()
     openai_key = _get_openai()
     if store is None or openai_key is None:
         return None
+    # LLM_MODEL et LLM_PROVIDER peuvent avoir été mis à jour dynamiquement via la sidebar
+    current_llm_model = os.getenv("LLM_MODEL", LLM_MODEL)
     if AGENT_BACKEND == "elysia":
         from langgraph_implementation.rag_agent import ElysiaRAGAgent
         return ElysiaRAGAgent(
             weaviate_store  = store,
             openai_key      = openai_key,
             embedding_model = EMBEDDING_MODEL,
-            llm_model       = LLM_MODEL,
+            llm_model       = current_llm_model,
         )
 
-    from rag_agent import RAGAgent
+    from rag_pipeline import RAGAgent
     return RAGAgent(
         weaviate_store  = store,
         openai_key      = openai_key,
         embedding_model = EMBEDDING_MODEL,
-        llm_model       = LLM_MODEL,
+        llm_model       = current_llm_model,
         top_k_retrieve  = TOP_K_RETRIEVE,
         top_k_final     = TOP_K_FINAL,
         hybrid_alpha    = HYBRID_ALPHA,
@@ -106,23 +123,84 @@ if "selected_source" not in st.session_state:
 # ════════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("🔍 RAG POC")
-    st.caption("Streamlit · Weaviate hybrid · OpenAI")
+    st.caption("Streamlit · Weaviate hybrid · LiteLLM multi-provider")
     st.divider()
-
     # ── Clés API ───────────────────────────────────────────────────────────────
     st.subheader("⚙️ Configuration")
-    api_key_input = st.text_input(
-        "OpenAI API Key (LLM + embeddings)",
+
+    # Clé OpenAI toujours requise (embeddings)
+    openai_key_input = st.text_input(
+        "OpenAI API Key (embeddings)",
         value=os.getenv("OPENAI_API_KEY", ""),
         type="password",
         placeholder="sk-…",
     )
-    if api_key_input:
-        os.environ["OPENAI_API_KEY"] = api_key_input
-        if api_key_input != os.getenv("_LAST_OPENAI_KEY", ""):
-            os.environ["_LAST_OPENAI_KEY"] = api_key_input
+    if openai_key_input:
+        os.environ["OPENAI_API_KEY"] = openai_key_input
+        if openai_key_input != os.getenv("_LAST_OPENAI_KEY", ""):
+            os.environ["_LAST_OPENAI_KEY"] = openai_key_input
             _get_openai.clear()
-            _get_agent.clear()  # le store reste ouvert, seul l'agent change
+            _get_agent.clear()
+
+    # ── Provider et modèle LLM ────────────────────────────────────────────────
+    import sys
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from llm.constants import PROVIDER_MODELS, PROVIDER_LIST
+
+    _provider_list = PROVIDER_LIST
+    _current_provider = os.getenv("LLM_PROVIDER", LLM_PROVIDER)
+    _provider_index = _provider_list.index(_current_provider) if _current_provider in _provider_list else 0
+
+    selected_provider = st.selectbox("LLM Provider", _provider_list, index=_provider_index)
+
+    _model_list = PROVIDER_MODELS[selected_provider]
+    _current_model = os.getenv("LLM_MODEL", LLM_MODEL)
+    # Si le modèle en env appartient à un autre provider, on retombe sur le premier de la liste
+    _model_index = _model_list.index(_current_model) if _current_model in _model_list else 0
+    selected_model = st.selectbox("Modèle LLM", _model_list, index=_model_index)
+
+    # Champ API key / URL conditionnel selon le provider
+    _llm_key_changed = False
+    if selected_provider == "mistral":
+        _mistral_key = st.text_input(
+            "Mistral API Key",
+            value=os.getenv("MISTRAL_API_KEY", ""),
+            type="password",
+            placeholder="…",
+        )
+        if _mistral_key and _mistral_key != os.getenv("MISTRAL_API_KEY", ""):
+            os.environ["MISTRAL_API_KEY"] = _mistral_key
+            _llm_key_changed = True
+    elif selected_provider == "claude":
+        _anthropic_key = st.text_input(
+            "Anthropic API Key",
+            value=os.getenv("ANTHROPIC_API_KEY", ""),
+            type="password",
+            placeholder="sk-ant-…",
+        )
+        if _anthropic_key and _anthropic_key != os.getenv("ANTHROPIC_API_KEY", ""):
+            os.environ["ANTHROPIC_API_KEY"] = _anthropic_key
+            _llm_key_changed = True
+    elif selected_provider == "ollama":
+        _ollama_url = st.text_input(
+            "Ollama base URL",
+            value=os.getenv("OLLAMA_API_BASE", "http://localhost:11434"),
+        )
+        if _ollama_url != os.getenv("OLLAMA_API_BASE", ""):
+            os.environ["OLLAMA_API_BASE"] = _ollama_url
+            _llm_key_changed = True
+
+    # Mettre à jour l'env et invalider le cache si le provider ou le modèle a changé
+    if (
+        selected_provider != os.getenv("_LAST_LLM_PROVIDER", "")
+        or selected_model != os.getenv("_LAST_LLM_MODEL", "")
+        or _llm_key_changed
+    ):
+        os.environ["LLM_PROVIDER"]        = selected_provider
+        os.environ["LLM_MODEL"]           = selected_model
+        os.environ["_LAST_LLM_PROVIDER"]  = selected_provider
+        os.environ["_LAST_LLM_MODEL"]     = selected_model
+        _get_agent.clear()
 
     st.divider()
 
@@ -263,10 +341,14 @@ with st.sidebar:
     st.divider()
 
     # ── Statuts ───────────────────────────────────────────────────────────
-    weaviate_ok = store is not None and store.is_ready()
-    openai_ok   = openai_key is not None
-    st.caption(f"Weaviate : {'🟢 connecté'  if weaviate_ok else '🔴 déconnecté'}")
-    st.caption(f"OpenAI   : {'🟢 configuré' if openai_ok   else '🔴 clé manquante'}")
+    weaviate_ok  = store is not None and store.is_ready()
+    openai_ok    = openai_key is not None
+    provider_ok  = _llm_provider_ready()
+    _active_model = os.getenv("LLM_MODEL", LLM_MODEL).split("/")[-1]
+    _active_prov  = os.getenv("LLM_PROVIDER", LLM_PROVIDER)
+    st.caption(f"Weaviate            : {'🟢 connecté'  if weaviate_ok else '🔴 déconnecté'}")
+    st.caption(f"OpenAI (embeddings) : {'🟢 configuré' if openai_ok   else '🔴 clé manquante'}")
+    st.caption(f"LLM ({_active_prov} / {_active_model}) : {'🟢 prêt' if provider_ok else '🔴 clé manquante'}")
 
     if st.button("🔄 Recharger", use_container_width=True):
         _close_store()
@@ -340,9 +422,9 @@ def _build_conversation_summary() -> str:
 st.title("💬 Chat RAG")
 
 # Bannières d'état
-if not api_key_input and not os.getenv("OPENAI_API_KEY"):
+if not os.getenv("OPENAI_API_KEY"):
     st.info(
-        "\U0001f448 Renseignez votre clé OpenAI dans la barre latérale pour commencer.",
+        "\U0001f448 Renseignez votre clé OpenAI (embeddings) dans la barre latérale pour commencer.",
         icon="ℹ️",
     )
 elif not (store and store.is_ready()):

@@ -19,31 +19,19 @@ def _embed_texts(
     texts: list[str],
     openai_key: str,
     model: str,
-    batch_size: int = 2048,
     progress_cb: Callable[[str], None] | None = None,
 ) -> list[list[float]]:
-    """Encode une liste de textes en vecteurs via l'API OpenAI Embeddings.
-
-    openai.embeddings.create accepte jusqu'à 2048 textes par appel.
-    Les textes vides sont remplacés par un espace pour éviter les erreurs.
-    """
-    from openai import OpenAI
-
-    client = OpenAI(api_key=openai_key)
-    # OpenAI rejette les chaînes vides — on les remplace par un espace
-    sanitized = [t if t and t.strip() else " " for t in texts]
-    vectors: list[list[float]] = []
-    total = len(sanitized)
-
-    for i in range(0, total, batch_size):
-        batch = sanitized[i : i + batch_size]
-        result = client.embeddings.create(model=model, input=batch)
-        # Les embeddings sont retournés dans l'ordre des entrées (triés par index)
-        vectors.extend([e.embedding for e in sorted(result.data, key=lambda e: e.index)])
-        if progress_cb:
-            progress_cb(f"  Embedding {min(i + batch_size, total)}/{total}…")
-
-    return vectors
+    """Encode une liste de textes en vecteurs via l'EmbeddingModel centralisé."""
+    from llm import EmbeddingModel, EmbedTextType
+    
+    # On initialise le modèle avec la clé fournie (qui peut être OpenAI ou autre selon le modèle)
+    embedder = EmbeddingModel(model=model, api_key=openai_key)
+    
+    # LiteLLM/EmbeddingModel gère déjà le batching interne
+    if progress_cb:
+        progress_cb(f"  Embedding {len(texts)} chunks avec {model}...")
+        
+    return embedder.embed_batch(texts, text_type=EmbedTextType.PASSAGE)
 
 
 # ── mode openingestion ────────────────────────────────────────────────────────

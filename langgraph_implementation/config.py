@@ -15,8 +15,15 @@ class Config:
     
     # LLM Configuration
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview")
+    MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    
+    # Models Configuration
+    DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "openai")
+    # For litellm, model name should preferably include the provider (e.g., openai/gpt-4-turbo)
+    # But usually litellm routes standard models fine.
+    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4-turbo-preview")
     
     # Weaviate Configuration
     WEAVIATE_URL = os.getenv("WCD_URL", "http://localhost:8080")
@@ -39,8 +46,8 @@ class Config:
     @classmethod
     def validate(cls) -> bool:
         """Validate critical configuration settings."""
-        if cls.USE_LLM and not cls.OPENAI_API_KEY:
-            print("WARNING: USE_LLM=true but OPENAI_API_KEY not set")
+        if cls.USE_LLM and not (cls.OPENAI_API_KEY or cls.MISTRAL_API_KEY or cls.ANTHROPIC_API_KEY or cls.DEFAULT_LLM_PROVIDER == 'ollama'):
+            print("WARNING: USE_LLM=true but no LLM API KEY is set")
             return False
         
         if cls.USE_WEAVIATE and not cls.WEAVIATE_URL:
@@ -91,11 +98,15 @@ def setup_llm_client():
         return None
     
     try:
-        from langchain.chat_models import ChatOpenAI
+        import sys
+        import os
+        # Add parent dir to path to import llm package
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from llm import get_langchain_llm
         
-        client = ChatOpenAI(
-            model_name=Config.OPENAI_MODEL,
-            api_key=Config.OPENAI_API_KEY,
+        client = get_langchain_llm(
+            provider_model=Config.LLM_MODEL,
+            api_key=Config.OPENAI_API_KEY, # Pass if needed, or rely on env
             temperature=0.7,
             max_tokens=2000,
         )
@@ -103,7 +114,7 @@ def setup_llm_client():
         return client
         
     except ImportError:
-        print("WARNING: langchain-openai package not installed")
+        print("WARNING: llm_factory or litellm not available")
         return None
     except Exception as e:
         print(f"ERROR: Failed to initialize LLM client: {e}")

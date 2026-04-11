@@ -334,9 +334,11 @@ def build_rag_graph(
     """
     import threading
 
+    import litellm
     from openai import OpenAI
     from langgraph.graph import END, START, StateGraph
 
+    # Client OpenAI conservé UNIQUEMENT pour les embeddings
     client = OpenAI(api_key=openai_key)
 
     # Cohere client (optionnel)
@@ -363,7 +365,7 @@ def build_rag_graph(
 
         def _run():
             try:
-                result["response"] = client.chat.completions.create(
+                result["response"] = litellm.completion(
                     model=llm_model, messages=messages, **kwargs
                 )
             except Exception as exc:
@@ -384,28 +386,15 @@ def build_rag_graph(
         text: str,
         timeout: float = llm_timeout,
     ) -> list[float]:
-        """Appelle client.embeddings.create dans un thread avec timeout.
-
-        Retourne directement le vecteur (list[float]).
-        """
-        result: dict = {"vector": None, "error": None}
-
-        def _run():
-            try:
-                resp = client.embeddings.create(model=embedding_model, input=text or " ")
-                result["vector"] = resp.data[0].embedding
-            except Exception as exc:
-                result["error"] = exc
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-
-        if t.is_alive():
-            raise TimeoutError(f"Embedding timeout après {timeout}s")
-        if result["error"]:
-            raise result["error"]
-        return result["vector"]
+        """Appelle EmbeddingModel dans un thread avec timeout."""
+        from llm import EmbeddingModel, EmbedTextType
+        
+        embedder = EmbeddingModel(
+            model=embedding_model,
+            api_key=openai_key, # Peut être une autre clé selon le provider
+            timeout=timeout
+        )
+        return embedder.embed_text(text, text_type=EmbedTextType.QUERY)
 
     def _resolve_sources_by_names(target_names: list[str], sources: list[str]) -> list[str]:
         """Résout une liste de noms de fichiers vers leurs chemins complets."""

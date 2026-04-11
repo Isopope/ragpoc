@@ -50,26 +50,22 @@ class DecisionMaker:
             return
 
         try:
-            from langchain.chat_models import ChatOpenAI
+            import sys
+            import os
+            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from llm import get_langchain_llm
             from langchain.output_parsers import PydanticOutputParser
             
-            self.llm = ChatOpenAI(
-                model_name=self.model_name,
+            self.llm = get_langchain_llm(
+                provider_model=self.model_name,
                 temperature=0.7,
                 max_tokens=1000,
             )
-            
             self.decision_parser = PydanticOutputParser(pydantic_object=DecisionOutput)
-            
+            if self.llm is None:
+                raise ImportError("ChatLiteLLM failed to load")
+                
         except ImportError:
-            api_key = os.getenv("OPENAI_API_KEY", "")
-            if api_key:
-                try:
-                    from openai import OpenAI
-                    self.raw_client = OpenAI(api_key=api_key)
-                    return
-                except Exception:
-                    pass
             print("WARNING: LangChain not available, using mock LLM")
     
     async def decide(
