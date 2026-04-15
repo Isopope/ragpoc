@@ -72,6 +72,7 @@ class WeaviateStore:
     def _ensure_schema(self) -> None:
         if self._client.collections.exists(COLLECTION_NAME):
             logger.debug("Collection {} déjà présente.", COLLECTION_NAME)
+            self._migrate_schema()
             return
 
         self._client.collections.create(
@@ -93,8 +94,12 @@ class WeaviateStore:
                     tokenization=Tokenization.WORD,
                 ),
                 # ── métadonnées structurelles (filtrage / affichage) ──────
-                Property(name="source",        data_type=DataType.TEXT, skip_vectorization=True),
-                Property(name="kind",          data_type=DataType.TEXT, skip_vectorization=True),
+                Property(name="source",            data_type=DataType.TEXT, skip_vectorization=True),
+                Property(name="entity",            data_type=DataType.TEXT, skip_vectorization=True),
+                Property(name="document_label",    data_type=DataType.TEXT, tokenization=Tokenization.WORD),
+                Property(name="document_date",     data_type=DataType.TEXT, skip_vectorization=True),
+                Property(name="document_category", data_type=DataType.TEXT, skip_vectorization=True),
+                Property(name="kind",              data_type=DataType.TEXT, skip_vectorization=True),
                 Property(name="chunk_index",   data_type=DataType.INT),
                 Property(name="page_idx",      data_type=DataType.INT),
                 Property(name="token_count",   data_type=DataType.INT),
@@ -125,6 +130,21 @@ class WeaviateStore:
             ],
         )
         logger.info("Collection {} créée.", COLLECTION_NAME)
+
+    def _migrate_schema(self) -> None:
+        """Ajoute les propriétés manquantes sur une collection existante (migration)."""
+        collection = self._client.collections.get(COLLECTION_NAME)
+        existing = {p.name for p in collection.config.get().properties}
+        candidates = [
+            ("entity",            Property(name="entity",            data_type=DataType.TEXT, skip_vectorization=True)),
+            ("document_label",    Property(name="document_label",    data_type=DataType.TEXT, tokenization=Tokenization.WORD)),
+            ("document_date",     Property(name="document_date",     data_type=DataType.TEXT, skip_vectorization=True)),
+            ("document_category", Property(name="document_category", data_type=DataType.TEXT, skip_vectorization=True)),
+        ]
+        for name, prop in candidates:
+            if name not in existing:
+                collection.config.add_property(prop)
+                logger.info("Migration : propriété '{}' ajoutée à {}.", name, COLLECTION_NAME)
 
     def reset_collection(self) -> None:
         """Supprime et recrée la collection (dev / tests)."""
@@ -171,6 +191,17 @@ class WeaviateStore:
         logger.info("Supprimé {} chunk(s) pour la source : {}", count, source)
         return count
 
+    def delete_entity(self, entity: str) -> int:
+        """Supprime tous les chunks associés à une entité donnée."""
+        self._ensure_connected()
+        collection = self._client.collections.get(COLLECTION_NAME)
+        result = collection.data.delete_many(
+            where=Filter.by_property("entity").equal(entity)
+        )
+        count = result.successful if result is not None else 0
+        logger.info("Supprimé {} chunk(s) pour l'entité : {}", count, entity)
+        return count
+
     # ── lecture ───────────────────────────────────────────────────────────────
 
     def hybrid_search(
@@ -180,6 +211,7 @@ class WeaviateStore:
         top_k: int = 20,
         alpha: float = 0.5,
         source: str | None = None,
+        entity: str | None = None,
     ) -> list[dict]:
         """Recherche hybride BM25 + dense (HNSW).
 
@@ -195,10 +227,17 @@ class WeaviateStore:
             Pondération : 0.0 = BM25 pur, 1.0 = dense pur, 0.5 = équilibré.
         source:
             Filtre optionnel sur le chemin absolu du document.
+        entity:
+            Filtre optionnel sur l'entité (ex. 'dassault', 'thales').
         """
         self._ensure_connected()
         collection = self._client.collections.get(COLLECTION_NAME)
-        filters = Filter.by_property("source").equal(source) if source else None
+        filters = None
+        if source:
+            filters = Filter.by_property("source").equal(source)
+        if entity:
+            ef = Filter.by_property("entity").equal(entity)
+            filters = ef if filters is None else filters & ef
 
         result = collection.query.hybrid(
             query=query,
@@ -224,10 +263,16 @@ class WeaviateStore:
         query_vector: list[float],
         top_k: int = 20,
         source: str | None = None,
+        entity: str | None = None,
     ) -> list[dict]:
         """Recherche dense pure (conservée pour compatibilité / tests)."""
         collection = self._client.collections.get(COLLECTION_NAME)
-        filters = Filter.by_property("source").equal(source) if source else None
+        filters = None
+        if source:
+            filters = Filter.by_property("source").equal(source)
+        if entity:
+            ef = Filter.by_property("entity").equal(entity)
+            filters = ef if filters is None else filters & ef
 
         result = collection.query.near_vector(
             near_vector=query_vector,
@@ -245,15 +290,14 @@ class WeaviateStore:
             })
         return docs
 
-    def list_sources(self) -> list[str]:
-        """Retourne la liste des sources uniques indexées."""
+    def list_sources(self, entity: str | None = None) -> list[str]:
+        """Retourne la liste des sources uniques indexées, optionnellement filtrées par entité."""
         self._ensure_connected()
         collection = self._client.collections.get(COLLECTION_NAME)
-        # On récupère uniquement la propriété source pour économiser de la mémoire
-        result = collection.query.fetch_objects(
-            limit=10_000,
-            return_properties=["source"],
-        )
+        fetch_kwargs: dict = dict(limit=10_000, return_properties=["source"])
+        if entity:
+            fetch_kwargs["filters"] = Filter.by_property("entity").equal(entity)
+        result = collection.query.fetch_objects(**fetch_kwargs)
         sources = sorted(
             set(
                 obj.properties.get("source", "")
@@ -263,17 +307,59 @@ class WeaviateStore:
         )
         return sources
 
-    def count(self, source: str | None = None) -> int:
-        """Retourne le nombre total de chunks (ou filtré par source)."""
+    def list_sources_with_meta(self, entity: str | None = None) -> list[dict]:
+        """Retourne les sources uniques avec leurs métadonnées (entity, label, date, catégorie)."""
         self._ensure_connected()
         collection = self._client.collections.get(COLLECTION_NAME)
-        if source:
-            resp = collection.aggregate.over_all(
-                total_count=True,
-                filters=Filter.by_property("source").equal(source),
+        fetch_kwargs: dict = dict(
+            limit=10_000,
+            return_properties=["source", "entity", "document_label", "document_date", "document_category"],
+        )
+        if entity:
+            fetch_kwargs["filters"] = Filter.by_property("entity").equal(entity)
+        result = collection.query.fetch_objects(**fetch_kwargs)
+        seen: dict[str, dict] = {}
+        for obj in result.objects:
+            src = obj.properties.get("source", "")
+            if not src or src in seen:
+                continue
+            seen[src] = {
+                "source":            src,
+                "entity":            obj.properties.get("entity", ""),
+                "document_label":    obj.properties.get("document_label", ""),
+                "document_date":     obj.properties.get("document_date", ""),
+                "document_category": obj.properties.get("document_category", ""),
+            }
+        return sorted(seen.values(), key=lambda d: d["source"])
+
+    def list_entities(self) -> list[str]:
+        """Retourne la liste des entités uniques présentes dans la base."""
+        self._ensure_connected()
+        collection = self._client.collections.get(COLLECTION_NAME)
+        result = collection.query.fetch_objects(
+            limit=10_000,
+            return_properties=["entity"],
+        )
+        entities = sorted(
+            set(
+                obj.properties.get("entity", "")
+                for obj in result.objects
+                if obj.properties.get("entity")
             )
-        else:
-            resp = collection.aggregate.over_all(total_count=True)
+        )
+        return entities
+
+    def count(self, source: str | None = None, entity: str | None = None) -> int:
+        """Retourne le nombre total de chunks (filtrable par source et/ou entité)."""
+        self._ensure_connected()
+        collection = self._client.collections.get(COLLECTION_NAME)
+        filters = None
+        if source:
+            filters = Filter.by_property("source").equal(source)
+        if entity:
+            ef = Filter.by_property("entity").equal(entity)
+            filters = ef if filters is None else filters & ef
+        resp = collection.aggregate.over_all(total_count=True, filters=filters)
         return resp.total_count or 0
 
     def get_chunk_by_index(self, source: str, chunk_index: int) -> dict | None:

@@ -44,6 +44,10 @@ def _ingest_with_openingestion(
     openai_key: str,
     embedding_model: str,
     progress_cb: Callable[[str], None],
+    entity: str = "",
+    document_label: str = "",
+    document_date: str = "",
+    document_category: str = "",
 ) -> tuple[list[dict], list[list[float]]]:
     from openingestion import ingest
 
@@ -66,9 +70,13 @@ def _ingest_with_openingestion(
         html = extras.get("html", getattr(c, "html", "")) or ""
 
         chunk_dicts.append({
-            "page_content":  c.page_content,
-            "source":        source,
-            "kind":          c.kind.value if hasattr(c.kind, "value") else str(c.kind),
+            "page_content":      c.page_content,
+            "source":            source,
+            "entity":            entity,
+            "document_label":    document_label,
+            "document_date":     document_date,
+            "document_category": document_category,
+            "kind":              c.kind.value if hasattr(c.kind, "value") else str(c.kind),
             "title_path":    c.title_path or "",
             "title_level":   c.title_level,
             "chunk_index":   c.chunk_index,
@@ -98,6 +106,10 @@ def _ingest_simple(
     embedding_model: str,
     chunk_size: int = 800,
     progress_cb: Callable[[str], None] | None = None,
+    entity: str = "",
+    document_label: str = "",
+    document_date: str = "",
+    document_category: str = "",
 ) -> tuple[list[dict], list[list[float]]]:
     try:
         import fitz
@@ -126,9 +138,13 @@ def _ingest_simple(
             if not block:
                 continue
             chunk_dicts.append({
-                "page_content":   block,
-                "source":        source,
-                "kind":          "text",
+                "page_content":      block,
+                "source":            source,
+                "entity":            entity,
+                "document_label":    document_label,
+                "document_date":     document_date,
+                "document_category": document_category,
+                "kind":              "text",
                 "title_path":    "",
                 "title_level":   0,
                 "chunk_index":   idx,
@@ -162,6 +178,10 @@ def ingest_pdf(
     parser: str = "docling",
     progress_cb: Callable[[str], None] | None = None,
     force_simple: bool = False,
+    entity: str = "",
+    document_label: str = "",
+    document_date: str = "",
+    document_category: str = "",
 ) -> int:
     """Parse un PDF, embed ses chunks via OpenAI Embeddings et les stocke dans Weaviate.
 
@@ -183,6 +203,14 @@ def ingest_pdf(
         Callback appelé avec des messages de progression (pour l'UI).
     force_simple:
         Si True, utilise le mode PyMuPDF même si openingestion est dispo.
+    entity:
+        Entité propriétaire du document (ex. 'dassault', 'thales').
+    document_label:
+        Libellé lisible du document (renseigné manuellement à l'ingestion).
+    document_date:
+        Date du document au format ISO YYYY-MM-DD.
+    document_category:
+        Catégorie libre du document.
 
     Returns
     -------
@@ -197,13 +225,17 @@ def ingest_pdf(
 
     if force_simple:
         chunk_dicts, vectors = _ingest_simple(
-            pdf_path, source, openai_key, embedding_model, progress_cb=_cb
+            pdf_path, source, openai_key, embedding_model, progress_cb=_cb,
+            entity=entity, document_label=document_label,
+            document_date=document_date, document_category=document_category,
         )
     else:
         try:
             chunk_dicts, vectors = _ingest_with_openingestion(
                 pdf_path, source, parser, chunking_strategy,
                 openai_key, embedding_model, _cb,
+                entity=entity, document_label=document_label,
+                document_date=document_date, document_category=document_category,
             )
         except ImportError:
             logger.warning(
@@ -211,7 +243,9 @@ def ingest_pdf(
             )
             _cb("⚠️ openingestion non installé, mode simple activé.")
             chunk_dicts, vectors = _ingest_simple(
-                pdf_path, source, openai_key, embedding_model, progress_cb=_cb
+                pdf_path, source, openai_key, embedding_model, progress_cb=_cb,
+                entity=entity, document_label=document_label,
+                document_date=document_date, document_category=document_category,
             )
 
     _cb("Stockage dans Weaviate…")
@@ -229,6 +263,10 @@ def ingest_jsonl(
     embedding_model: str = "text-embedding-3-small",
     progress_cb: Callable[[str], None] | None = None,
     source_override: str | None = None,
+    entity: str = "",
+    document_label: str = "",
+    document_date: str = "",
+    document_category: str = "",
 ) -> int:
     """Ingère un fichier JSONL de chunks pré-découpés (format openingestion) dans Weaviate.
 
@@ -250,8 +288,14 @@ def ingest_jsonl(
         Callback de progression (UI).
     source_override:
         Remplace le champ ``source`` présent dans le JSONL.
-        Utile quand le chemin stocké dans le fichier ne correspond plus
-        à l'emplacement réel du PDF.
+    entity:
+        Entité propriétaire du document (ex. 'dassault', 'thales').
+    document_label:
+        Libellé lisible du document.
+    document_date:
+        Date du document au format ISO YYYY-MM-DD.
+    document_category:
+        Catégorie libre du document.
     """
     import json as _json
 
@@ -293,9 +337,13 @@ def ingest_jsonl(
         html: str = extras.get("html", "") or ""
 
         chunk_dicts.append({
-            "page_content":  raw.get("page_content") or "",
-            "source":        source,
-            "kind":          raw.get("kind") or "text",
+            "page_content":      raw.get("page_content") or "",
+            "source":            source,
+            "entity":            entity or raw.get("entity") or "",
+            "document_label":    document_label or raw.get("document_label") or "",
+            "document_date":     document_date or raw.get("document_date") or "",
+            "document_category": document_category or raw.get("document_category") or "",
+            "kind":              raw.get("kind") or "text",
             "title_path":    raw.get("title_path") or "",
             "title_level":   int(raw.get("title_level") or 0),
             "chunk_index":   int(raw.get("chunk_index") or 0),

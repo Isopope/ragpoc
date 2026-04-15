@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import atexit
+import datetime
+import json
 import os
 from pathlib import Path
 
@@ -25,6 +27,25 @@ MAX_TOKENS      = int(os.getenv("MAX_TOKENS", "1000"))
 AGENT_BACKEND   = os.getenv("AGENT_BACKEND", "rag_pipeline")
 UPLOADS_DIR     = Path(__file__).parent / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
+ENTITIES_FILE   = Path(__file__).parent / "entities.json"
+
+
+def _load_entities() -> list[str]:
+    """Lit la liste des entités depuis entities.json. Crée le fichier si absent."""
+    if not ENTITIES_FILE.exists():
+        ENTITIES_FILE.write_text(json.dumps({"entities": ["global"]}, indent=2, ensure_ascii=False))
+    try:
+        data = json.loads(ENTITIES_FILE.read_text(encoding="utf-8"))
+        return sorted(set(e.strip() for e in data.get("entities", []) if e.strip()))
+    except Exception:
+        return ["global"]
+
+
+def _save_entities(entities: list[str]) -> None:
+    """Sauvegarde la liste des entités dans entities.json."""
+    ENTITIES_FILE.write_text(
+        json.dumps({"entities": sorted(set(entities))}, indent=2, ensure_ascii=False)
+    )
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -211,27 +232,49 @@ with st.sidebar:
 
     st.subheader("📚 Documents indexés")
     if store and store.is_ready():
-        try:
-            sources = store.list_sources()
-        except Exception:
-            sources = []
+        # Filtre par entité
+        known_entities = _load_entities()
+        all_entities_choice = "— Toutes les entités —"
+        entity_choice = st.selectbox(
+            "Filtrer par entité",
+            [all_entities_choice] + known_entities,
+            key="sidebar_entity_filter",
+        )
+        selected_entity_filter = entity_choice if entity_choice != all_entities_choice else None
 
-        if sources:
-            source_names = {Path(s).name: s for s in sources}
-            all_choice   = "— Tous les documents —"
+        try:
+            sources_meta = store.list_sources_with_meta(entity=selected_entity_filter)
+        except Exception:
+            sources_meta = []
+
+        if sources_meta:
+            def _source_label(m: dict) -> str:
+                name = Path(m["source"]).name
+                badge = f" [{m['entity']}]" if m.get("entity") else ""
+                label = f" – {m['document_label']}" if m.get("document_label") else ""
+                return f"{name}{badge}{label}"
+
+            display_to_source = {_source_label(m): m["source"] for m in sources_meta}
+            all_choice = "— Tous les documents —"
             choice = st.selectbox(
                 "Filtrer la recherche",
-                [all_choice] + list(source_names.keys()),
+                [all_choice] + list(display_to_source.keys()),
             )
             st.session_state.selected_source = (
-                source_names[choice] if choice != all_choice else None
+                display_to_source[choice] if choice != all_choice else None
             )
 
             if choice != all_choice:
-                n_chunks = store.count(source_names[choice])
-                st.caption(f"{n_chunks} chunks pour ce document.")
+                sel_source = display_to_source[choice]
+                sel_meta = next((m for m in sources_meta if m["source"] == sel_source), {})
+                n_chunks = store.count(sel_source)
+                st.caption(f"{n_chunks} chunks")
+                if sel_meta.get("document_date"):
+                    st.caption(f"Date : {sel_meta['document_date']}")
+                if sel_meta.get("document_category"):
+                    st.caption(f"Catégorie : {sel_meta['document_category']}")
                 if st.button("🗑️ Supprimer ce document", use_container_width=True):
-                    store.delete_source(source_names[choice])
+                    store.delete_source(sel_source)
                     st.success("Document supprimé.")
                     st.rerun()
         else:
@@ -258,11 +301,93 @@ with st.sidebar:
 
     st.divider()
 
+    # ── Gestion des entités ─────────────────────────────────────────────────
+    with st.expander("🏢 Gérer les entités", expanded=False):
+        current_entities = _load_entities()
+        st.caption("Entités disponibles à l'ingestion :")
+        for ent in current_entities:
+            col_e, col_del = st.columns([4, 1])
+            col_e.markdown(f"`{ent}`")
+            if col_del.button("✖️", key=f"del_entity_{ent}", help=f"Retirer '{ent}' de la liste"):
+                updated = [e for e in current_entities if e != ent]
+                _save_entities(updated)
+                st.success(f"Entité '{ent}' retirée.")
+                st.rerun()
+        st.divider()
+        new_entity = st.text_input("Ajouter une entité", placeholder="ex. airbus", key="new_entity_input")
+        if st.button("Ajouter", use_container_width=True, key="add_entity_btn"):
+            new_entity = new_entity.strip().lower()
+            if new_entity and new_entity not in current_entities:
+                _save_entities(current_entities + [new_entity])
+                st.success(f"Entité '{new_entity}' ajoutée.")
+                st.rerun()
+            elif new_entity in current_entities:
+                st.warning("Cette entité existe déjà.")
+
+    st.divider()
+
     # ── Upload & ingestion ────────────────────────────────────────────────
     st.subheader("📤 Ajouter un document")
     uploaded = st.file_uploader("Choisir un PDF ou un JSONL", type=["pdf", "jsonl"])
 
     is_jsonl = uploaded is not None and uploaded.name.lower().endswith(".jsonl")
+
+    # ── Entité propriétaire ────────────────────────────────────────────────
+    _ingestion_entities = _load_entities()
+    _ent_col, _new_col = st.columns([3, 2])
+    with _ent_col:
+        selected_entity = st.selectbox(
+            "Entité propriétaire",
+            _ingestion_entities,
+            help="À quelle organisation appartient ce document ?",
+            key="ingestion_entity",
+        )
+    with _new_col:
+        st.markdown("<br>", unsafe_allow_html=True)  # alignement vertical
+        create_mode = st.toggle("➕ Créer", key="create_entity_toggle")
+
+    if create_mode:
+        _nc1, _nc2 = st.columns([3, 1])
+        new_ent_name = _nc1.text_input(
+            "Nom de la nouvelle entité",
+            placeholder="ex. airbus",
+            key="new_entity_inline",
+            label_visibility="collapsed",
+        )
+        if _nc2.button("Ajouter", key="add_entity_inline_btn", use_container_width=True):
+            new_ent_name = new_ent_name.strip().lower()
+            if new_ent_name and new_ent_name not in _ingestion_entities:
+                _save_entities(_ingestion_entities + [new_ent_name])
+                st.success(f"Entité '{new_ent_name}' créée.")
+                st.rerun()
+            elif new_ent_name in _ingestion_entities:
+                st.warning("Cette entité existe déjà.")
+
+    # ── Métadonnées du document ────────────────────────────────────────────
+    _default_label = Path(uploaded.name).stem.replace("_", " ") if uploaded else ""
+    document_label = st.text_input(
+        "Libellé du document",
+        value=_default_label,
+        placeholder="ex. Rapport annuel 2024",
+        help="Nom lisible affiché dans la liste et utilisé dans la recherche.",
+        key="doc_label",
+    )
+    _dc1, _dc2 = st.columns(2)
+    with _dc1:
+        document_date_val = st.date_input(
+            "Date du document",
+            value=None,
+            help="Date de publication ou de référence (optionnel).",
+            key="doc_date",
+        )
+        document_date = document_date_val.isoformat() if document_date_val else ""
+    with _dc2:
+        document_category = st.text_input(
+            "Catégorie",
+            placeholder="ex. contrat, notice, audit…",
+            help="Catégorie libre pour organiser vos documents.",
+            key="doc_category",
+        )
 
     if not is_jsonl:
         col1, col2 = st.columns(2)
@@ -315,6 +440,10 @@ with st.sidebar:
                     embedding_model=EMBEDDING_MODEL,
                     progress_cb=_progress,
                     source_override=source_override_input.strip() or None,
+                    entity=selected_entity,
+                    document_label=document_label.strip(),
+                    document_date=document_date,
+                    document_category=document_category.strip(),
                 )
             else:
                 from ingestor import ingest_pdf
@@ -328,6 +457,10 @@ with st.sidebar:
                     parser=parser if parser != "simple" else "docling",
                     force_simple=(parser == "simple"),
                     progress_cb=_progress,
+                    entity=selected_entity,
+                    document_label=document_label.strip(),
+                    document_date=document_date,
+                    document_category=document_category.strip(),
                 )
             st.success(f"✅ {n} chunks indexés pour « {uploaded.name} »")
             _close_store()
