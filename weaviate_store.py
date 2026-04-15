@@ -16,6 +16,7 @@ from weaviate.classes.config import (
     Configure,
     DataType,
     Property,
+    Reconfigure,
     Tokenization,
     VectorDistances,
 )
@@ -134,6 +135,11 @@ class WeaviateStore:
             ],
         )
         logger.info("Collection {} créée.", COLLECTION_NAME)
+        # Active indexNullState pour pouvoir filtrer is_none sur validity_date
+        collection = self._client.collections.get(COLLECTION_NAME)
+        collection.config.update(
+            inverted_index_config=Reconfigure.inverted_index(index_null_state=True)
+        )
 
     def _migrate_schema(self) -> None:
         """Ajoute les propriétés manquantes sur une collection existante (migration)."""
@@ -151,6 +157,16 @@ class WeaviateStore:
             if name not in existing:
                 collection.config.add_property(prop)
                 logger.info("Migration : propriété '{}' ajoutée à {}.", name, COLLECTION_NAME)
+        # S'assure que indexNullState est activé (nécessaire pour Filter.is_none sur validity_date)
+        try:
+            cfg = collection.config.get()
+            if not getattr(cfg.inverted_index_config, "index_null_state", False):
+                collection.config.update(
+                    inverted_index_config=Reconfigure.inverted_index(index_null_state=True)
+                )
+                logger.info("Migration : indexNullState activé sur {}.", COLLECTION_NAME)
+        except Exception as exc:
+            logger.warning("Migration : impossible de vérifier/activer indexNullState : {}", exc)
 
     def reset_collection(self) -> None:
         """Supprime et recrée la collection (dev / tests)."""
