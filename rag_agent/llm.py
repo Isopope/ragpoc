@@ -126,6 +126,10 @@ class PlanningOutput(BaseModel):
         default_factory=list,
         description="Noms de fichiers explicitement mentionnés et pertinents pour la question",
     )
+    target_entity: str = Field(
+        default="",
+        description="Entité explicitement mentionnée dans la question (ex. 'dassault'). Vide si aucune.",
+    )
     reason: str = Field(
         default="",
         description="Courte explication de la décision de planification",

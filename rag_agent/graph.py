@@ -167,11 +167,17 @@ class RAGAgent:
         except Exception:
             available_sources = []
 
+        try:
+            available_sources_meta = weaviate_with_retry(self._store.list_sources_with_meta)
+        except Exception:
+            available_sources_meta = []
+
         initial_state = create_unified_state(
             question             = question,
             source               = source,
             conversation_summary = conversation_summary,
             available_sources    = available_sources,
+            available_sources_meta = available_sources_meta,
             max_tree_depth       = self._config.max_tree_depth,
         )
 
@@ -205,10 +211,16 @@ class RAGAgent:
         except Exception:
             available_sources = []
 
+        try:
+            available_sources_meta = weaviate_with_retry(self._store.list_sources_with_meta)
+        except Exception:
+            available_sources_meta = []
+
         initial_state = create_unified_state(
             question          = question,
             source            = source,
             available_sources = available_sources,
+            available_sources_meta = available_sources_meta,
             max_tree_depth    = self._config.max_tree_depth,
         )
 

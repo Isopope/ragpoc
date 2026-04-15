@@ -8,12 +8,26 @@ Embeddings : OpenAI Embeddings (text-embedding-3-small, text-embedding-3-large, 
 """
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 from typing import Callable
 
 from loguru import logger
 
 # ── embedding helper (OpenAI) ────────────────────────────────────────────────
+
+def _iso_to_datetime(date_str: str) -> datetime.datetime | None:
+    """Convertit une chaîne ISO YYYY-MM-DD en datetime UTC aware (requis par Weaviate DATE).
+
+    Retourne None si la chaîne est vide ou invalide.
+    """
+    if not date_str:
+        return None
+    try:
+        d = datetime.date.fromisoformat(date_str)
+        return datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc)
+    except (ValueError, AttributeError):
+        return None
 
 def _embed_texts(
     texts: list[str],
@@ -45,9 +59,7 @@ def _ingest_with_openingestion(
     embedding_model: str,
     progress_cb: Callable[[str], None],
     entity: str = "",
-    document_label: str = "",
-    document_date: str = "",
-    document_category: str = "",
+    validity_date: str = "",
 ) -> tuple[list[dict], list[list[float]]]:
     from openingestion import ingest
 
@@ -73,9 +85,7 @@ def _ingest_with_openingestion(
             "page_content":      c.page_content,
             "source":            source,
             "entity":            entity,
-            "document_label":    document_label,
-            "document_date":     document_date,
-            "document_category": document_category,
+            "validity_date":     _iso_to_datetime(validity_date),
             "kind":              c.kind.value if hasattr(c.kind, "value") else str(c.kind),
             "title_path":    c.title_path or "",
             "title_level":   c.title_level,
@@ -107,9 +117,7 @@ def _ingest_simple(
     chunk_size: int = 800,
     progress_cb: Callable[[str], None] | None = None,
     entity: str = "",
-    document_label: str = "",
-    document_date: str = "",
-    document_category: str = "",
+    validity_date: str = "",
 ) -> tuple[list[dict], list[list[float]]]:
     try:
         import fitz
@@ -141,9 +149,7 @@ def _ingest_simple(
                 "page_content":      block,
                 "source":            source,
                 "entity":            entity,
-                "document_label":    document_label,
-                "document_date":     document_date,
-                "document_category": document_category,
+                "validity_date":     _iso_to_datetime(validity_date),
                 "kind":              "text",
                 "title_path":    "",
                 "title_level":   0,
@@ -179,9 +185,7 @@ def ingest_pdf(
     progress_cb: Callable[[str], None] | None = None,
     force_simple: bool = False,
     entity: str = "",
-    document_label: str = "",
-    document_date: str = "",
-    document_category: str = "",
+    validity_date: str = "",
 ) -> int:
     """Parse un PDF, embed ses chunks via OpenAI Embeddings et les stocke dans Weaviate.
 
@@ -205,12 +209,9 @@ def ingest_pdf(
         Si True, utilise le mode PyMuPDF même si openingestion est dispo.
     entity:
         Entité propriétaire du document (ex. 'dassault', 'thales').
-    document_label:
-        Libellé lisible du document (renseigné manuellement à l'ingestion).
-    document_date:
-        Date du document au format ISO YYYY-MM-DD.
-    document_category:
-        Catégorie libre du document.
+    validity_date:
+        Date de validité au format ISO YYYY-MM-DD. Après cette date, le document
+        est automatiquement exclu des résultats de recherche.
 
     Returns
     -------
@@ -226,16 +227,14 @@ def ingest_pdf(
     if force_simple:
         chunk_dicts, vectors = _ingest_simple(
             pdf_path, source, openai_key, embedding_model, progress_cb=_cb,
-            entity=entity, document_label=document_label,
-            document_date=document_date, document_category=document_category,
+            entity=entity, validity_date=validity_date,
         )
     else:
         try:
             chunk_dicts, vectors = _ingest_with_openingestion(
                 pdf_path, source, parser, chunking_strategy,
                 openai_key, embedding_model, _cb,
-                entity=entity, document_label=document_label,
-                document_date=document_date, document_category=document_category,
+                entity=entity, validity_date=validity_date,
             )
         except ImportError:
             logger.warning(
@@ -244,8 +243,7 @@ def ingest_pdf(
             _cb("⚠️ openingestion non installé, mode simple activé.")
             chunk_dicts, vectors = _ingest_simple(
                 pdf_path, source, openai_key, embedding_model, progress_cb=_cb,
-                entity=entity, document_label=document_label,
-                document_date=document_date, document_category=document_category,
+                entity=entity, validity_date=validity_date,
             )
 
     _cb("Stockage dans Weaviate…")
@@ -264,9 +262,7 @@ def ingest_jsonl(
     progress_cb: Callable[[str], None] | None = None,
     source_override: str | None = None,
     entity: str = "",
-    document_label: str = "",
-    document_date: str = "",
-    document_category: str = "",
+    validity_date: str = "",
 ) -> int:
     """Ingère un fichier JSONL de chunks pré-découpés (format openingestion) dans Weaviate.
 
@@ -290,12 +286,8 @@ def ingest_jsonl(
         Remplace le champ ``source`` présent dans le JSONL.
     entity:
         Entité propriétaire du document (ex. 'dassault', 'thales').
-    document_label:
-        Libellé lisible du document.
-    document_date:
-        Date du document au format ISO YYYY-MM-DD.
-    document_category:
-        Catégorie libre du document.
+    validity_date:
+        Date de validité au format ISO YYYY-MM-DD.
     """
     import json as _json
 
@@ -340,9 +332,9 @@ def ingest_jsonl(
             "page_content":      raw.get("page_content") or "",
             "source":            source,
             "entity":            entity or raw.get("entity") or "",
-            "document_label":    document_label or raw.get("document_label") or "",
-            "document_date":     document_date or raw.get("document_date") or "",
-            "document_category": document_category or raw.get("document_category") or "",
+            "validity_date":     _iso_to_datetime(
+                validity_date or raw.get("validity_date") or raw.get("document_date") or ""
+            ),
             "kind":              raw.get("kind") or "text",
             "title_path":    raw.get("title_path") or "",
             "title_level":   int(raw.get("title_level") or 0),

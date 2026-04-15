@@ -75,6 +75,12 @@ class UnifiedRAGState(TypedDict):
     source_filter: Optional[str]
     """Si défini, restreint toutes les recherches à ce chemin de source."""
 
+    entity_filter: Optional[str]
+    """Entité détectée par analyze_and_plan (ex. 'dassault'). Restreint toutes les recherches à cette entité."""
+
+    available_sources_meta: list[dict]
+    """Métadonnées enrichies des sources : [{source, entity, validity_date}]. Alimenté par graph.py."""
+
     target_sources: list[str]
     """Documents explicitement ciblés par la planification, résolus en chemins complets."""
 
@@ -192,6 +198,7 @@ def create_unified_state(
     source: Optional[str] = None,
     conversation_summary: str = "",
     available_sources: Optional[list[str]] = None,
+    available_sources_meta: Optional[list[dict]] = None,
     user_id: str = "anonymous",
     conversation_id: Optional[str] = None,
     collection_metadata: Optional[dict] = None,
@@ -208,6 +215,8 @@ def create_unified_state(
         question=question,
         available_sources=available_sources or [],
         source_filter=source,
+        entity_filter=None,
+        available_sources_meta=available_sources_meta or [],
         target_sources=[source] if source else [],
         conversation_summary=conversation_summary,
         collection_metadata=collection_metadata or {},

@@ -251,8 +251,7 @@ with st.sidebar:
             def _source_label(m: dict) -> str:
                 name = Path(m["source"]).name
                 badge = f" [{m['entity']}]" if m.get("entity") else ""
-                label = f" – {m['document_label']}" if m.get("document_label") else ""
-                return f"{name}{badge}{label}"
+                return f"{name}{badge}"
 
             display_to_source = {_source_label(m): m["source"] for m in sources_meta}
             all_choice = "— Tous les documents —"
@@ -269,10 +268,8 @@ with st.sidebar:
                 sel_meta = next((m for m in sources_meta if m["source"] == sel_source), {})
                 n_chunks = store.count(sel_source)
                 st.caption(f"{n_chunks} chunks")
-                if sel_meta.get("document_date"):
-                    st.caption(f"Date : {sel_meta['document_date']}")
-                if sel_meta.get("document_category"):
-                    st.caption(f"Catégorie : {sel_meta['document_category']}")
+                if sel_meta.get("validity_date"):
+                    st.caption(f"Valide jusqu'au : {sel_meta['validity_date']}")
                 if st.button("🗑️ Supprimer ce document", use_container_width=True):
                     store.delete_source(sel_source)
                     st.success("Document supprimé.")
@@ -364,30 +361,13 @@ with st.sidebar:
                 st.warning("Cette entité existe déjà.")
 
     # ── Métadonnées du document ────────────────────────────────────────────
-    _default_label = Path(uploaded.name).stem.replace("_", " ") if uploaded else ""
-    document_label = st.text_input(
-        "Libellé du document",
-        value=_default_label,
-        placeholder="ex. Rapport annuel 2024",
-        help="Nom lisible affiché dans la liste et utilisé dans la recherche.",
-        key="doc_label",
+    validity_date_val = st.date_input(
+        "Date de validité",
+        value=None,
+        help="Après cette date, le document sera automatiquement exclu des résultats de recherche. Laisser vide = pas d'expiration.",
+        key="doc_date",
     )
-    _dc1, _dc2 = st.columns(2)
-    with _dc1:
-        document_date_val = st.date_input(
-            "Date du document",
-            value=None,
-            help="Date de publication ou de référence (optionnel).",
-            key="doc_date",
-        )
-        document_date = document_date_val.isoformat() if document_date_val else ""
-    with _dc2:
-        document_category = st.text_input(
-            "Catégorie",
-            placeholder="ex. contrat, notice, audit…",
-            help="Catégorie libre pour organiser vos documents.",
-            key="doc_category",
-        )
+    validity_date = validity_date_val.isoformat() if validity_date_val else ""
 
     if not is_jsonl:
         col1, col2 = st.columns(2)
@@ -441,9 +421,7 @@ with st.sidebar:
                     progress_cb=_progress,
                     source_override=source_override_input.strip() or None,
                     entity=selected_entity,
-                    document_label=document_label.strip(),
-                    document_date=document_date,
-                    document_category=document_category.strip(),
+                    validity_date=validity_date,
                 )
             else:
                 from ingestor import ingest_pdf
@@ -458,9 +436,7 @@ with st.sidebar:
                     force_simple=(parser == "simple"),
                     progress_cb=_progress,
                     entity=selected_entity,
-                    document_label=document_label.strip(),
-                    document_date=document_date,
-                    document_category=document_category.strip(),
+                    validity_date=validity_date,
                 )
             st.success(f"✅ {n} chunks indexés pour « {uploaded.name} »")
             _close_store()

@@ -16,14 +16,21 @@ from ..state import UnifiedRAGState, log_entry
 
 def _build_planning_prompt(
     question: str,
-    sources: list[str],
+    sources_meta: list[dict],
     conv_ctx: str,
 ) -> str:
-    source_names = ", ".join(Path(s).name for s in sources) if sources else "Aucun"
+    def _fmt(m: dict) -> str:
+        name = Path(m["source"]).name
+        e = (m.get("entity") or "").strip()
+        return f"{name} [{e}]" if e else name
+
+    source_names = ", ".join(_fmt(m) for m in sources_meta) if sources_meta else "Aucun"
+    entities = sorted({(m.get("entity") or "").strip() for m in sources_meta if (m.get("entity") or "").strip()})
+    entities_line = f"\nEntités disponibles : {', '.join(entities)}" if entities else ""
     return (
         f"Tu es un expert en analyse de requêtes documentaires.{conv_ctx}\n"
         f"Question de l'utilisateur : {question}\n"
-        f"Documents disponibles : {source_names}\n\n"
+        f"Documents disponibles : {source_names}{entities_line}\n\n"
         "RÈGLES DE REFORMULATION (strictes) :\n"
         "1. La question DOIT être auto-suffisante — elle doit contenir toutes les informations nécessaires sans le contexte de conversation.\n"
         "2. Ne générer que des questions pertinentes au domaine documentaire disponible.\n"
@@ -31,10 +38,14 @@ def _build_planning_prompt(
         "4. Si la question est complexe, la décomposer en 2-3 aspects distincts. Sinon, générer 1 seule sous-requête.\n"
         "5. Si la question fait référence à quelque chose mentionné dans la conversation précédente, l'intégrer explicitement dans la sous-requête.\n"
         "6. Si un ou plusieurs noms de fichiers sont explicitement mentionnés parmi les documents disponibles, indique-les dans \"targets\". Sinon [].\n"
-        "7. En cas de comparaison entre plusieurs documents, conserve-les tous dans \"targets\" et n'en choisis pas un seul arbitrairement.\n\n"
+        "7. En cas de comparaison entre plusieurs documents, conserve-les tous dans \"targets\" et n'en choisis pas un seul arbitrairement.\n"
+        "8. Si l'utilisateur mentionne une organisation ou une entité connue (ex. 'chez Dassault', 'pour Thales', 'je travaille à...'), "
+        "indique le nom exact de l'entité dans \"target_entity\" (minuscules, correspond exactement à une entité disponible). "
+        "Sinon laisse \"target_entity\" vide.\n\n"
         "Réponds UNIQUEMENT en JSON (sans balise markdown) sous la forme :\n"
         '{\n'
         '  "targets": ["<nom_fichier_1>", "<nom_fichier_2>"],\n'
+        '  "target_entity": "<nom_entité_ou_vide>",\n'
         '  "reason": "<explication courte>",\n'
         '  "sub_queries": ["<requête_1>", "<requête_2>"],\n'
         '  "confidence": 0.9\n'
@@ -75,6 +86,12 @@ def analyze_and_plan(state: UnifiedRAGState, *, llm_call: Callable, rag_config: 
     sources  = state.get("available_sources", [])
     filter_  = state.get("source_filter")
 
+    # Métadonnées enrichies (entity, validity_date par source)
+    sources_meta = state.get("available_sources_meta") or []
+    if not sources_meta and sources:
+        # Fallback : construire des méta minimales sans entité
+        sources_meta = [{"source": s, "entity": "", "validity_date": ""} for s in sources]
+
     if filter_:
         log.append(log_entry("analyze", f"Filtre manuel → {Path(filter_).name}", {"source": filter_}))
 
@@ -82,7 +99,7 @@ def analyze_and_plan(state: UnifiedRAGState, *, llm_call: Callable, rag_config: 
     if state.get("conversation_summary"):
         conv_ctx = f"\nContexte de la conversation précédente :\n{state['conversation_summary']}\n"
 
-    prompt = _build_planning_prompt(question, sources, conv_ctx)
+    prompt = _build_planning_prompt(question, sources_meta, conv_ctx)
     parsed_output: Optional[PlanningOutput] = None
 
     for attempt in range(2):
@@ -121,25 +138,28 @@ def analyze_and_plan(state: UnifiedRAGState, *, llm_call: Callable, rag_config: 
 
     resolved_targets = _resolve_source_filters(parsed_output.targets, sources)
     final_filter     = filter_ or (resolved_targets[0] if len(resolved_targets) == 1 else None)
+    entity_f         = (parsed_output.target_entity or "").strip().lower() or None
 
     log.append(log_entry(
         "analyze",
-        f"Cibles : {parsed_output.targets or ['aucune']}. Requêtes : {parsed_output.sub_queries}",
+        f"Cibles : {parsed_output.targets or ['aucune']}. Entité : {entity_f or 'aucune'}. Requêtes : {parsed_output.sub_queries}",
         {
-            "target": final_filter,
-            "targets": resolved_targets,
-            "sub_queries": parsed_output.sub_queries,
-            "reason": parsed_output.reason,
+            "target":        final_filter,
+            "targets":       resolved_targets,
+            "entity_filter": entity_f,
+            "sub_queries":   parsed_output.sub_queries,
+            "reason":        parsed_output.reason,
         },
     ))
 
     return {
-        "sub_queries":    parsed_output.sub_queries,
-        "source_filter":  final_filter,
-        "target_sources": resolved_targets,
-        "reasoning":      parsed_output.reason,
-        "current_branch": "plan",
-        "decision_history": list(state.get("decision_history", [])) + ["plan.analyze"],
-        "tree_depth":     state.get("tree_depth", 0) + 1,
-        "decision_log":   log,
+        "sub_queries":          parsed_output.sub_queries,
+        "source_filter":        final_filter,
+        "entity_filter":        entity_f,
+        "target_sources":       resolved_targets,
+        "reasoning":            parsed_output.reason,
+        "current_branch":       "plan",
+        "decision_history":     list(state.get("decision_history", [])) + ["plan.analyze"],
+        "tree_depth":           state.get("tree_depth", 0) + 1,
+        "decision_log":         log,
     }

@@ -133,6 +133,7 @@ class QueryTool:
         self,
         query: str,
         source_filter: Optional[str] = None,
+        entity_filter: Optional[str] = None,
         top_k: int = 20,
         alpha: float = 0.5,
     ) -> list[dict]:
@@ -150,12 +151,12 @@ class QueryTool:
         sem_docs = weaviate_with_retry(
             self.weaviate_store.hybrid_search,
             query=query, query_vector=vector,
-            top_k=top_k, alpha=alpha, source=source_filter,
+            top_k=top_k, alpha=alpha, source=source_filter, entity=entity_filter,
         )
         kw_docs  = weaviate_with_retry(
             self.weaviate_store.hybrid_search,
             query=query, query_vector=vector,
-            top_k=top_k, alpha=max(0.0, round(alpha - 0.3, 1)), source=source_filter,
+            top_k=top_k, alpha=max(0.0, round(alpha - 0.3, 1)), source=source_filter, entity=entity_filter,
         )
         return weighted_rrf([sem_docs, kw_docs], [1.0, 0.5])
 

@@ -7,6 +7,8 @@ Recherche        : hybrid (BM25 + dense), paramétrable via alpha
 """
 from __future__ import annotations
 
+import datetime
+
 from loguru import logger
 
 import weaviate
@@ -96,9 +98,11 @@ class WeaviateStore:
                 # ── métadonnées structurelles (filtrage / affichage) ──────
                 Property(name="source",            data_type=DataType.TEXT, skip_vectorization=True),
                 Property(name="entity",            data_type=DataType.TEXT, skip_vectorization=True),
-                Property(name="document_label",    data_type=DataType.TEXT, tokenization=Tokenization.WORD),
-                Property(name="document_date",     data_type=DataType.TEXT, skip_vectorization=True),
-                Property(name="document_category", data_type=DataType.TEXT, skip_vectorization=True),
+                Property(name="validity_date",
+                         data_type=DataType.DATE,
+                         skip_vectorization=True,
+                         index_filterable=True,
+                         index_range_filters=True),
                 Property(name="kind",              data_type=DataType.TEXT, skip_vectorization=True),
                 Property(name="chunk_index",   data_type=DataType.INT),
                 Property(name="page_idx",      data_type=DataType.INT),
@@ -136,10 +140,12 @@ class WeaviateStore:
         collection = self._client.collections.get(COLLECTION_NAME)
         existing = {p.name for p in collection.config.get().properties}
         candidates = [
-            ("entity",            Property(name="entity",            data_type=DataType.TEXT, skip_vectorization=True)),
-            ("document_label",    Property(name="document_label",    data_type=DataType.TEXT, tokenization=Tokenization.WORD)),
-            ("document_date",     Property(name="document_date",     data_type=DataType.TEXT, skip_vectorization=True)),
-            ("document_category", Property(name="document_category", data_type=DataType.TEXT, skip_vectorization=True)),
+            ("entity",        Property(name="entity",        data_type=DataType.TEXT, skip_vectorization=True)),
+            ("validity_date", Property(name="validity_date",
+                                       data_type=DataType.DATE,
+                                       skip_vectorization=True,
+                                       index_filterable=True,
+                                       index_range_filters=True)),
         ]
         for name, prop in candidates:
             if name not in existing:
@@ -204,6 +210,18 @@ class WeaviateStore:
 
     # ── lecture ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _validity_filter() -> Filter:
+        """Filtre automatique : exclut les chunks dont la validity_date est dépassée.
+
+        Les chunks sans validity_date (None) sont toujours inclus.
+        """
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return (
+            Filter.by_property("validity_date").is_none(True)
+            | Filter.by_property("validity_date").greater_or_equal(now)
+        )
+
     def hybrid_search(
         self,
         query: str,
@@ -238,6 +256,9 @@ class WeaviateStore:
         if entity:
             ef = Filter.by_property("entity").equal(entity)
             filters = ef if filters is None else filters & ef
+        # Filtre automatique sur la date de validité
+        vf = self._validity_filter()
+        filters = vf if filters is None else filters & vf
 
         result = collection.query.hybrid(
             query=query,
@@ -266,6 +287,7 @@ class WeaviateStore:
         entity: str | None = None,
     ) -> list[dict]:
         """Recherche dense pure (conservée pour compatibilité / tests)."""
+        self._ensure_connected()
         collection = self._client.collections.get(COLLECTION_NAME)
         filters = None
         if source:
@@ -273,6 +295,9 @@ class WeaviateStore:
         if entity:
             ef = Filter.by_property("entity").equal(entity)
             filters = ef if filters is None else filters & ef
+        # Filtre automatique sur la date de validité
+        vf = self._validity_filter()
+        filters = vf if filters is None else filters & vf
 
         result = collection.query.near_vector(
             near_vector=query_vector,
@@ -313,7 +338,7 @@ class WeaviateStore:
         collection = self._client.collections.get(COLLECTION_NAME)
         fetch_kwargs: dict = dict(
             limit=10_000,
-            return_properties=["source", "entity", "document_label", "document_date", "document_category"],
+            return_properties=["source", "entity", "validity_date"],
         )
         if entity:
             fetch_kwargs["filters"] = Filter.by_property("entity").equal(entity)
@@ -323,12 +348,14 @@ class WeaviateStore:
             src = obj.properties.get("source", "")
             if not src or src in seen:
                 continue
+            vd = obj.properties.get("validity_date")
+            # Weaviate retourne les DATE comme datetime, on formate en ISO pour l'affichage
+            if isinstance(vd, datetime.datetime):
+                vd = vd.date().isoformat()
             seen[src] = {
-                "source":            src,
-                "entity":            obj.properties.get("entity", ""),
-                "document_label":    obj.properties.get("document_label", ""),
-                "document_date":     obj.properties.get("document_date", ""),
-                "document_category": obj.properties.get("document_category", ""),
+                "source":        src,
+                "entity":        obj.properties.get("entity", ""),
+                "validity_date": vd or "",
             }
         return sorted(seen.values(), key=lambda d: d["source"])
 

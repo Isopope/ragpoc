@@ -129,12 +129,22 @@ def _build_initial_prompt(state: UnifiedRAGState) -> str:
     """Construit le prompt inicial de la boucle ReAct."""
     sources_info = ""
     if state.get("available_sources"):
-        names        = [Path(s).name for s in state["available_sources"]]
+        sources_meta = state.get("available_sources_meta") or []
+        meta_by_src  = {m["source"]: m for m in sources_meta}
+
+        def _fmt_src(s: str) -> str:
+            m = meta_by_src.get(s, {})
+            e = (m.get("entity") or "").strip()
+            return f"{Path(s).name} [{e}]" if e else Path(s).name
+
+        names        = [_fmt_src(s) for s in state["available_sources"]]
         sources_info = f"Documents indexés: {', '.join(names)}."
-        if state.get("source_filter"):
+        if state.get("entity_filter"):
+            sources_info += f" (Filtré sur l'entité '{state['entity_filter']}')"            
+        elif state.get("source_filter"):
             sources_info += f" (Filtré sur {Path(state['source_filter']).name})"
         elif state.get("target_sources"):
-            target_names = [Path(s).name for s in state.get("target_sources", [])]
+            target_names = [_fmt_src(s) for s in state.get("target_sources", [])]
             if target_names:
                 sources_info += f" Documents explicitement ciblés: {', '.join(target_names)}."
 
@@ -280,18 +290,22 @@ def agent_action(
         if fc_name == "search_documents":
             query                 = fc_args.get("query", "")
             requested_source_name = str(fc_args.get("source_name") or "").strip()
+            entity_arg            = str(fc_args.get("entity") or "").strip().lower()
+            # Entité : argument LLM > filtre d'entité global du state
+            item_entity           = entity_arg or (state.get("entity_filter") or "")
             resolved_source       = (
                 filter_
                 or next((s for s in target_sources if Path(s).name.lower() == requested_source_name.lower()), None)
                 or next((s for s in state.get("available_sources", []) if Path(s).name.lower() == requested_source_name.lower()), None)
             )
-            query_signature = f"{requested_source_name.lower()}::{query.lower().strip()}"
+            query_signature = f"{item_entity}::{requested_source_name.lower()}::{query.lower().strip()}"
             is_dup          = any(q.lower().strip() == query_signature for q, _ in seen_queries)
             seen_queries.append((query_signature, 1.0))
 
             item.update({
                 "query":                  query,
                 "requested_source_name":  requested_source_name,
+                "entity_filter":          item_entity or None,
                 "resolved_source":        resolved_source,
                 "query_signature":        query_signature,
             })
@@ -332,6 +346,7 @@ def agent_action(
             chunks = query_tool.execute(
                 it["query"],
                 source_filter=it["resolved_source"],
+                entity_filter=it.get("entity_filter"),
                 top_k=rag_config.top_k_retrieve,
                 alpha=rag_config.hybrid_alpha,
             )
@@ -399,7 +414,10 @@ def agent_action(
                 result = {"found": len(merged), "new_chunks": new_count, "results": chunks_info[:10]}
                 log.append(log_entry(
                     "agent.action",
-                    f"Recherche '{item['query'][:50]}' sur {item['requested_source_name'] or 'toute la base'} → {len(merged)} hits ({new_count} nouveaux)",
+                    f"Recherche '{item['query'][:50]}' "
+                    f"entité={item.get('entity_filter') or 'toutes'} "
+                    f"src={item['requested_source_name'] or 'toute la base'} "
+                    f"→ {len(merged)} hits ({new_count} nouveaux)",
                     {
                         "query":            item["query"],
                         "source_name":      item["requested_source_name"] or None,
@@ -479,6 +497,7 @@ def consolidate_chunks(
             docs = query_tool.execute(
                 state["question"],
                 source_filter=state.get("source_filter"),
+                entity_filter=state.get("entity_filter"),
                 top_k=rag_config.top_k_retrieve,
                 alpha=0.5,
             )
